@@ -721,7 +721,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
     private void clickSlotGrid(MinecraftClient client, ScreenHandler handler, int slotIndex, int button) {
         client.interactionManager.clickSlot(handler.syncId, slotIndex, button, SlotActionType.PICKUP, client.player);
-        cooldown(CONFIG.craftPlaceCooldownMs);
+        // Slow down for batch 14 onwards to prevent server desync during conversions
+        long delay = CONFIG.craftPlaceCooldownMs;
+        if (craftBatchIndex >= 14) {
+            delay *= 3;
+        }
+        cooldown(delay);
     }
 
     private void cooldown(long ms) {
@@ -1128,7 +1133,9 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 setCraftCooldown();
                 return true;
             }
-            if (now - pendingSinceMs < 20) {
+            // Slow down for batch 14 onwards to give server more time to recognize conversions
+            long conversionTimeout = craftBatchIndex >= 14 ? 200 : 20;
+            if (now - pendingSinceMs < conversionTimeout) {
                 setCraftCooldown();
                 return true;
             }
@@ -1238,7 +1245,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
     private void quickMoveSlot(MinecraftClient client, ScreenHandler handler, int slotIndex) {
         client.interactionManager.clickSlot(handler.syncId, slotIndex, 0, SlotActionType.QUICK_MOVE, client.player);
-        cooldown(CONFIG.craftPlaceCooldownMs); // significantly longer delay for server sync
+        // Slow down for batch 14 onwards to prevent server desync during conversions
+        long delay = CONFIG.craftPlaceCooldownMs;
+        if (craftBatchIndex >= 14) {
+            delay *= 3;
+        }
+        cooldown(delay); // significantly longer delay for server sync
     }
 
     private boolean dumpCursorToInventory(MinecraftClient client, ScreenHandler h) {
