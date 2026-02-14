@@ -62,6 +62,11 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private static final int NUGGET_SLOT = 5;
     private static final int NOTE_SLOT = 8;
     private static final int MIN_ACTION_COOLDOWN_TICKS = 1; // maximum speed for crafting operations
+    
+    // Server desync prevention: slow down processing starting at this batch index
+    private static final int DESYNC_PREVENTION_BATCH_THRESHOLD = 14;
+    private static final int BATCH_DELAY_MULTIPLIER = 3; // multiply delays by this factor for batches >= threshold
+    
     // Precomputed optimal block/nugget conversions per batch (64 items per batch).
     // Format: {crafts, blocksToBreak, ingotsToNuggets}
     // For 64 crafts: 320 ingots + 64 nuggets needed. 64 nuggets = 8 ingots, so 328 ingots total = 37 blocks
@@ -723,8 +728,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
         client.interactionManager.clickSlot(handler.syncId, slotIndex, button, SlotActionType.PICKUP, client.player);
         // Slow down for batch 14 onwards to prevent server desync during conversions
         long delay = CONFIG.craftPlaceCooldownMs;
-        if (craftBatchIndex >= 14) {
-            delay *= 3;
+        if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+            delay *= BATCH_DELAY_MULTIPLIER;
         }
         cooldown(delay);
     }
@@ -858,8 +863,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private void setCraftCooldown() {
         int cooldown = Math.max(CONFIG.craftTickCooldown, MIN_ACTION_COOLDOWN_TICKS);
         // Slow down for batch 14 onwards (triple the cooldown)
-        if (craftBatchIndex >= 14) {
-            cooldown *= 3;
+        if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+            cooldown *= BATCH_DELAY_MULTIPLIER;
         }
         craftTickCooldown = cooldown;
     }
@@ -1134,7 +1139,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 return true;
             }
             // Slow down for batch 14 onwards to give server more time to recognize conversions
-            long conversionTimeout = craftBatchIndex >= 14 ? 200 : 20;
+            long conversionTimeout = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 200 : 20;
             if (now - pendingSinceMs < conversionTimeout) {
                 setCraftCooldown();
                 return true;
@@ -1247,8 +1252,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
         client.interactionManager.clickSlot(handler.syncId, slotIndex, 0, SlotActionType.QUICK_MOVE, client.player);
         // Slow down for batch 14 onwards to prevent server desync during conversions
         long delay = CONFIG.craftPlaceCooldownMs;
-        if (craftBatchIndex >= 14) {
-            delay *= 3;
+        if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+            delay *= BATCH_DELAY_MULTIPLIER;
         }
         cooldown(delay); // significantly longer delay for server sync
     }
@@ -1764,8 +1769,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
             // give the server a moment to settle the crafting grid before we start crafting
             // Use configurable post-grid delay, with increased delay for batch 14 onwards
             long delayToUse = (CONFIG != null && CONFIG.postGridDelayMs > 0 ? CONFIG.postGridDelayMs : postGridDelayMs);
-            if (craftBatchIndex >= 14) {
-                delayToUse *= 3; // Slow down for batch 14 onwards (triple the delay)
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                delayToUse *= BATCH_DELAY_MULTIPLIER; // Slow down for batch 14 onwards (triple the delay)
             }
             gridReadyAtMs = System.currentTimeMillis() + delayToUse;
             craftBatchIndex++;
@@ -1811,8 +1816,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
             // Add delay after collecting output to prevent crashes/desync
             // Slow down for batch 14 onwards (triple the delay)
             int burstDelay = (int)(CONFIG.craftOutputBurstDelayMs / 50L);
-            if (craftBatchIndex >= 14) {
-                burstDelay *= 3;
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                burstDelay *= BATCH_DELAY_MULTIPLIER;
             }
             craftTickCooldown = Math.max(burstDelay, 1);
             return;
