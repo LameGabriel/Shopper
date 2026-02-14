@@ -852,7 +852,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
     private void setCraftCooldown() {
         int cooldown = Math.max(CONFIG.craftTickCooldown, MIN_ACTION_COOLDOWN_TICKS);
-        // Slow down for batch 14 and batch 15 (triple the cooldown)
+        // Slow down for batch 14 onwards (triple the cooldown)
         if (craftBatchIndex >= 14) {
             cooldown *= 3;
         }
@@ -1750,10 +1750,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
             }
             gridLoaded = true;
             // give the server a moment to settle the crafting grid before we start crafting
-            // Use configurable post-grid delay, with increased delay for batch 14 and batch 15
+            // Use configurable post-grid delay, with increased delay for batch 14 onwards
             long delayToUse = (CONFIG != null && CONFIG.postGridDelayMs > 0 ? CONFIG.postGridDelayMs : postGridDelayMs);
             if (craftBatchIndex >= 14) {
-                delayToUse *= 3; // Slow down for batch 14 and batch 15 (triple the delay)
+                delayToUse *= 3; // Slow down for batch 14 onwards (triple the delay)
             }
             gridReadyAtMs = System.currentTimeMillis() + delayToUse;
             craftBatchIndex++;
@@ -1797,7 +1797,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 msg(client, "AutoCraft: crafted " + craftCrafted + "/" + craftTarget);
             }
             // Add delay after collecting output to prevent crashes/desync
-            // Slow down for batch 14 and batch 15 (triple the delay)
+            // Slow down for batch 14 onwards (triple the delay)
             int burstDelay = (int)(CONFIG.craftOutputBurstDelayMs / 50L);
             if (craftBatchIndex >= 14) {
                 burstDelay *= 3;
