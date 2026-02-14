@@ -851,7 +851,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
 
     private void setCraftCooldown() {
-        craftTickCooldown = Math.max(CONFIG.craftTickCooldown, MIN_ACTION_COOLDOWN_TICKS);
+        int cooldown = Math.max(CONFIG.craftTickCooldown, MIN_ACTION_COOLDOWN_TICKS);
+        // Slow down after batch 14 (triple the cooldown)
+        if (craftBatchIndex > 14) {
+            cooldown *= 3;
+        }
+        craftTickCooldown = cooldown;
     }
 
 
@@ -1745,8 +1750,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
             }
             gridLoaded = true;
             // give the server a moment to settle the crafting grid before we start crafting
-            // Use configurable post-grid delay
-            gridReadyAtMs = System.currentTimeMillis() + (CONFIG != null && CONFIG.postGridDelayMs > 0 ? CONFIG.postGridDelayMs : postGridDelayMs);
+            // Use configurable post-grid delay, with increased delay after batch 14
+            long delayToUse = (CONFIG != null && CONFIG.postGridDelayMs > 0 ? CONFIG.postGridDelayMs : postGridDelayMs);
+            if (craftBatchIndex > 14) {
+                delayToUse *= 3; // Slow down after batch 14 (triple the delay)
+            }
+            gridReadyAtMs = System.currentTimeMillis() + delayToUse;
             craftBatchIndex++;
             planBlocksRemaining = 0;
             planIngotsToNuggetsRemaining = 0;
@@ -1788,7 +1797,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 msg(client, "AutoCraft: crafted " + craftCrafted + "/" + craftTarget);
             }
             // Add delay after collecting output to prevent crashes/desync
-            craftTickCooldown = Math.max((int)(CONFIG.craftOutputBurstDelayMs / 50L), 1);
+            // Slow down after batch 14 (triple the delay)
+            int burstDelay = (int)(CONFIG.craftOutputBurstDelayMs / 50L);
+            if (craftBatchIndex > 14) {
+                burstDelay *= 3;
+            }
+            craftTickCooldown = Math.max(burstDelay, 1);
             return;
         }
 
