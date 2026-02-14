@@ -66,6 +66,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
     // Server desync prevention: slow down processing starting at this batch index
     private static final int DESYNC_PREVENTION_BATCH_THRESHOLD = 14;
     private static final int BATCH_DELAY_MULTIPLIER = 3; // multiply delays by this factor for batches >= threshold
+    private static final int FAST_FILL_SLOTS_PER_TICK = 5; // number of slots to fill per tick for batches < threshold
+    private static final int SLOW_FILL_SLOTS_PER_TICK = 1; // number of slots to fill per tick for batches >= threshold
     
     // Precomputed optimal block/nugget conversions per batch (64 items per batch).
     // Format: {crafts, blocksToBreak, ingotsToNuggets}
@@ -1533,9 +1535,9 @@ public class ShopNavigatorClient implements ClientModInitializer {
         // Fill ingot slots (steps 1-5)
         // For batches 14+, fill one slot at a time to prevent server desync
         // For earlier batches, fill all 5 slots in one tick for maximum safe speed
-        int maxSlotsPerTick = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 1 : 5;
+        int maxSlotsPerTick = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? SLOW_FILL_SLOTS_PER_TICK : FAST_FILL_SLOTS_PER_TICK;
         int slotsFilledThisTick = 0;
-        while (gridFillStep >= 1 && gridFillStep <= 5 && slotsFilledThisTick < maxSlotsPerTick) {
+        while (gridFillStep >= 1 && gridFillStep <= FAST_FILL_SLOTS_PER_TICK && slotsFilledThisTick < maxSlotsPerTick) {
             // Recalculate inventory before each slot fill for batches 14+ to ensure accuracy
             if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
                 recalcInventory(client, false);
@@ -1555,7 +1557,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         }
         
         // If we filled some ingot slots but not all, return to continue next tick
-        if (gridFillStep >= 1 && gridFillStep <= 5) {
+        if (gridFillStep >= 1 && gridFillStep <= FAST_FILL_SLOTS_PER_TICK) {
             return false;
         }
 
