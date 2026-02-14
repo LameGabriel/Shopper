@@ -1530,9 +1530,17 @@ public class ShopNavigatorClient implements ClientModInitializer {
             return false;
         }
 
-        // Fill ingot slots (steps 1-5) - fill all 5 slots in one tick for maximum safe speed
+        // Fill ingot slots (steps 1-5)
+        // For batches 14+, fill one slot at a time to prevent server desync
+        // For earlier batches, fill all 5 slots in one tick for maximum safe speed
+        int maxSlotsPerTick = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 1 : 5;
         int slotsFilledThisTick = 0;
-        while (gridFillStep >= 1 && gridFillStep <= 5 && slotsFilledThisTick < 5) {
+        while (gridFillStep >= 1 && gridFillStep <= 5 && slotsFilledThisTick < maxSlotsPerTick) {
+            // Recalculate inventory before each slot fill for batches 14+ to ensure accuracy
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                recalcInventory(client, false);
+            }
+            
             int slotIndex = gridFillStep - 1;
             int targetSlot = INGOT_SLOTS[slotIndex];
             debug(client, "[GridFill] Filling ingot slot " + targetSlot + " (step " + gridFillStep + ")");
@@ -1553,6 +1561,11 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
         // Fill nugget slot (step 6)
         if (gridFillStep == 6) {
+            // Recalculate inventory before filling for batches 14+ to ensure accuracy
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                recalcInventory(client, false);
+            }
+            
             debug(client, "[GridFill] Filling nugget slot " + NUGGET_SLOT);
             if (!topUpSlot(client, h, NUGGET_SLOT, IRON_NUGGET, gridFillNeed)) {
                 msg(client, "AutoCraft: need " + gridFillNeed + " nuggets in slot " + NUGGET_SLOT + " (have " + h.getSlot(NUGGET_SLOT).getStack().getCount() + "), inv nuggets=" + nuggets + " ingots=" + ingots);
@@ -1561,11 +1574,20 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 return false;
             }
             gridFillStep++;
-            // Continue to note block slot in same tick
+            // For batches 14+, process nugget and note block on separate ticks
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                return false;
+            }
+            // Continue to note block slot in same tick for earlier batches
         }
 
         // Fill note block slot (step 7)
         if (gridFillStep == 7) {
+            // Recalculate inventory before filling for batches 14+ to ensure accuracy
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                recalcInventory(client, false);
+            }
+            
             debug(client, "[GridFill] Filling note block slot " + NOTE_SLOT);
             if (!topUpSlot(client, h, NOTE_SLOT, NOTE_BLOCK, gridFillNeed)) {
                 msg(client, "AutoCraft: need " + gridFillNeed + " note blocks in slot " + NOTE_SLOT + " (have " + h.getSlot(NOTE_SLOT).getStack().getCount() + "), inv notes=" + noteBlocks);
