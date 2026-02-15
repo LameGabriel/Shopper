@@ -348,7 +348,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
             // Check if there are any iron blocks, ingots, or nuggets
             if (ironBlocks > 0 || ingots > 0 || nuggets > 0) {
                 // Materials exist - try to craft more metronomes instead of selling
-                msg(client, "Found remaining materials (blocks=" + ironBlocks + " ingots=" + ingots + " nuggets=" + nuggets + ") - attempting to craft more instead of selling");
+                msg(client, String.format("Found remaining materials (blocks=%d ingots=%d nuggets=%d) - attempting to craft more instead of selling", ironBlocks, ingots, nuggets));
                 autoCraftMetronomes(client);
             } else {
                 // No materials - proceed with selling
