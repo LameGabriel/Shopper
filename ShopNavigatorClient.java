@@ -837,7 +837,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 nh.sendCommand("craft");
                 msg(client, "Sent /craft command");
             } catch (Exception e) {
-                msg(client, "Failed to send /craft (" + e.getClass().getSimpleName() + ")");
+                msg(client, "Failed to send /craft (" + e.getClass().getSimpleName() + ": " + e.getMessage() + ")");
             }
             return;
         }
