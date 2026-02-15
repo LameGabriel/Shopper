@@ -338,9 +338,23 @@ public class ShopNavigatorClient implements ClientModInitializer {
         }
 
         // If we queued selling after crafting, close any open screen then send /sell all
+        // But first check if there are iron materials remaining that could be crafted
         if (queueSellAfterClose && client.currentScreen == null && !craftRunning && !craftAwaiting) {
             queueSellAfterClose = false;
-            sendSellAllCommand(client);
+            
+            // Recalculate inventory to get current material counts
+            recalcInventory(client);
+            
+            // Check if there are any iron blocks, ingots, or nuggets
+            if (ironBlocks > 0 || ingots > 0 || nuggets > 0) {
+                // Materials exist - try to craft more metronomes instead of selling
+                msg(client, "Found remaining materials (blocks=" + ironBlocks + " ingots=" + ingots + " nuggets=" + nuggets + ") - attempting to craft more instead of selling");
+                autoCraftMetronomes(client);
+            } else {
+                // No materials - proceed with selling
+                sendSellAllCommand(client);
+            }
+            
             // wait 1 second before any new loop/command
             nextActionAtMs = System.currentTimeMillis() + 1000;
         }
