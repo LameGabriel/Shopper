@@ -835,7 +835,9 @@ public class ShopNavigatorClient implements ClientModInitializer {
             msg(client, "Running /craft to finish crafting metronomes...");
             try {
                 nh.sendCommand("craft");
-                msg(client, "Sent /craft command");
+                craftAwaiting = true;
+                craftAwaitTicks = 40; // ~2 seconds at 20 tps
+                msg(client, "Sent /craft command, waiting for crafting window...");
             } catch (Exception e) {
                 msg(client, "Failed to send /craft (" + e.getClass().getSimpleName() + ": " + e.getMessage() + ")");
             }
