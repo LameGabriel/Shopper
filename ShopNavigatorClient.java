@@ -344,6 +344,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
             
             // Check if more metronomes can be crafted with remaining materials
             // This properly accounts for iron blocks, ingots, nuggets AND note blocks
+            // Returns 0 if insufficient materials, otherwise the number of craftable metronomes
             int craftsPossible = computeCraftsPossible(client);
             
             if (craftsPossible > 0) {
