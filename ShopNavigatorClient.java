@@ -324,7 +324,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     
                     if (craftsPossible > 0) {
                         // Materials exist for at least one more craft - restart crafting instead of selling
-                        msg(client, String.format("Found materials for %d more metronome(s) - restarting crafting instead of selling", craftsPossible));
+                        msg(client, String.format("Restarting crafting for %d more metronome(s)", craftsPossible));
                         loopPhase = LoopPhase.CRAFTING;
                         autoCraftMetronomes(client);
                     } else {
