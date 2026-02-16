@@ -317,10 +317,23 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     return;
                 }
                 if (System.currentTimeMillis() >= phaseReadyAtMs) {
-                    sendSellAllCommand(client);
-                    loopPhase = LoopPhase.DELAY;
-                    phaseReadyAtMs = System.currentTimeMillis() + 1000;
-                    nextActionAtMs = phaseReadyAtMs;
+                    // Check if more metronomes can be crafted with remaining materials
+                    // This properly accounts for iron blocks, ingots, nuggets AND note blocks
+                    // Returns 0 if insufficient materials, otherwise the number of craftable metronomes
+                    int craftsPossible = computeCraftsPossible(client);
+                    
+                    if (craftsPossible > 0) {
+                        // Materials exist for at least one more craft - restart crafting instead of selling
+                        msg(client, String.format("Found materials for %d more metronome(s) - restarting crafting instead of selling", craftsPossible));
+                        loopPhase = LoopPhase.CRAFTING;
+                        autoCraftMetronomes(client);
+                    } else {
+                        // No materials - proceed with selling
+                        sendSellAllCommand(client);
+                        loopPhase = LoopPhase.DELAY;
+                        phaseReadyAtMs = System.currentTimeMillis() + 1000;
+                    }
+                    nextActionAtMs = System.currentTimeMillis() + 1000;
                 }
             }
             case DELAY -> {
