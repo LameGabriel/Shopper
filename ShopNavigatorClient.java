@@ -113,6 +113,11 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
     // Shopping state machine
     private State state = State.IDLE;
+    private State lastState = State.IDLE;
+    private long lastStateChangeMs = 0;
+    private int stateTimeoutRetries = 0;
+    private static final long STATE_TIMEOUT_MS = 10000; // 10 seconds
+    private static final int MAX_STATE_TIMEOUT_RETRIES = 3;
 
     private int lastPageNumber = -1;
     private long nextActionAtMs = 0;
@@ -440,6 +445,28 @@ public class ShopNavigatorClient implements ClientModInitializer {
         if (state == State.IDLE || state == State.DONE || state == State.FAILED) return;
 
         long now = System.currentTimeMillis();
+        
+        // Detect if state machine is stuck (no state change for too long)
+        if (state != State.IDLE && state != State.DONE && state != State.FAILED) {
+            long timeSinceStateChange = now - lastStateChangeMs;
+            if (timeSinceStateChange > STATE_TIMEOUT_MS) {
+                msg(client, "WARNING: State machine stuck in " + state + " for " + (timeSinceStateChange / 1000) + "s. Attempting recovery...");
+                
+                if (stateTimeoutRetries >= MAX_STATE_TIMEOUT_RETRIES) {
+                    fail(client, "State machine stuck after " + stateTimeoutRetries + " recovery attempts. State: " + state);
+                    stateTimeoutRetries = 0;
+                    return;
+                }
+                
+                stateTimeoutRetries++;
+                forceCloseScreen(client);
+                setState(State.SEND_SHOP);
+                cooldown(CONFIG.cooldownSendShopMs * 2); // Extra delay after recovery
+                msg(client, "Recovery attempt " + stateTimeoutRetries + "/" + MAX_STATE_TIMEOUT_RETRIES + ": Restarting from SEND_SHOP");
+                return;
+            }
+        }
+        
         if (now < nextActionAtMs) return;
 
         try {
@@ -451,7 +478,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
 
     private void start(MinecraftClient client) {
-        state = State.SEND_SHOP;
+        setState(State.SEND_SHOP);
         lastPageNumber = -1;
         nextActionAtMs = 0;
         currentStage = 1;
@@ -460,13 +487,15 @@ public class ShopNavigatorClient implements ClientModInitializer {
         activeQuantity = CONFIG.usePlan ? currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)] : CONFIG.targetQuantity;
         activeRemaining = activeQuantity;
         loggedMissingStageItems = false;
+        stateTimeoutRetries = 0;
         msg(client, "ShopNavigator: Started. Stage " + currentStage + " Target=" + currentTargetItemId + " qty=" + activeQuantity +
                 (CONFIG.usePlan ? " (plan " + currentPlanQuantities.length + " batches)" : ""));
     }
 
     private void stop(MinecraftClient client, String reason) {
-        state = State.IDLE;
+        setState(State.IDLE);
         nextActionAtMs = 0;
+        stateTimeoutRetries = 0;
         msg(client, "ShopNavigator: " + reason);
     }
 
@@ -478,13 +507,23 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
 
     private void done(MinecraftClient client, String reason) {
-        state = State.DONE;
+        setState(State.DONE);
+        stateTimeoutRetries = 0;
         msg(client, "ShopNavigator: DONE. " + reason);
     }
 
     private void fail(MinecraftClient client, String reason) {
-        state = State.FAILED;
+        setState(State.FAILED);
+        stateTimeoutRetries = 0;
         msg(client, "ShopNavigator: FAILED. " + reason);
+    }
+
+    private void setState(State newState) {
+        if (this.state != newState) {
+            this.lastState = this.state;
+            this.state = newState;
+            this.lastStateChangeMs = System.currentTimeMillis();
+        }
     }
 
     // Close GUI and then start the auto-crafting flow (same as F10) once the GUI is actually closed.
@@ -499,7 +538,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
             case SEND_SHOP -> {
                 // Send /shop, then wait for listing GUI
                 sendShopCommand(client);
-                state = State.WAIT_FOR_LISTING_6ROWS;
+                setState(State.WAIT_FOR_LISTING_6ROWS);
                 cooldown(CONFIG.cooldownSendShopMs);
             }
 
@@ -514,14 +553,14 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     // Some servers show a 5-row menu first; wait until we reach the 6-row listing.
                     if (rows == 6 && title != null && title.contains(CONFIG.listingTitleMustContain)) {
                         lastPageNumber = parsePageNumber(title);
-                        state = State.SCAN_PAGE_FOR_ITEM;
+                        setState(State.SCAN_PAGE_FOR_ITEM);
                         msg(client, "Listing detected. Title=\"" + title + "\" page=" + lastPageNumber);
                         cooldown(CONFIG.cooldownPageMs / 2);
                     }
                 } else {
                     // No pagination for this stage: proceed immediately
                     lastPageNumber = 1;
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     msg(client, "Listing detected (no pagination). Title=\"" + title + "\" rows=" + rows);
                     cooldown(CONFIG.cooldownPageMs / 2);
                 }
@@ -545,7 +584,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (foundSlot != -1) {
                     clickSlot(client, h, foundSlot);
                     msg(client, "Clicked target item at slot " + foundSlot + ". Waiting for quantity selector...");
-                    state = State.WAIT_FOR_QUANTITY_3ROWS;
+                    setState(State.WAIT_FOR_QUANTITY_3ROWS);
                     cooldown(CONFIG.cooldownQuantityMs);
                     return;
                 }
@@ -581,7 +620,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 String title = getHandledTitle(client);
                 lastPageNumber = parsePageNumber(title);
                 clickSlot(client, h, CONFIG.nextPageSlot);
-                state = State.WAIT_PAGE_CHANGE;
+                setState(State.WAIT_PAGE_CHANGE);
                 cooldown(CONFIG.cooldownPageMs);
             }
 
@@ -595,7 +634,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
                 // If title parsing fails, fall back to a short delay and rescan (still works).
                 if (page == -1) {
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     cooldown(CONFIG.cooldownPageMs);
                     return;
                 }
@@ -603,7 +642,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (page != lastPageNumber) {
                     lastPageNumber = page;
                     msg(client, "Page changed -> " + page);
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     cooldown(CONFIG.cooldownPageMs / 2);
                 }
             }
@@ -613,7 +652,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (g == null) return;
 
                 if (g.getRows() == 3) {
-                    state = State.CLICK_QUANTITY;
+                    setState(State.CLICK_QUANTITY);
                     cooldown(CONFIG.cooldownQuantityMs / 2);
                 }
             }
@@ -642,7 +681,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (activeRemaining > 0) {
                     msg(client, "Partial fill: picked " + selectedAmount + ", remaining " + activeRemaining + " for this batch");
                     // Need to reopen listing and item
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     cooldown(CONFIG.cooldownQuantityMs);
                 } else if (CONFIG.usePlan && planIndex + 1 < currentPlanQuantities.length) {
                     planIndex++;
@@ -650,7 +689,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     activeRemaining = activeQuantity;
                     loggedMissingStageItems = false;
                     msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; next qty " + activeQuantity + " — reopening shop");
-                    state = State.SEND_SHOP; // reopen in case GUI closed after purchase
+                    setState(State.SEND_SHOP); // reopen in case GUI closed after purchase
                     cooldown(CONFIG.cooldownSendShopMs);
                 } else {
                     // Stage completion
@@ -662,7 +701,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         activeRemaining = activeQuantity;
                         loggedMissingStageItems = false;
                         msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + " qty=" + activeQuantity);
-                        state = State.SEND_SHOP;
+                        setState(State.SEND_SHOP);
                         cooldown(CONFIG.cooldownSendShopMs);
                     } else {
                         // final stage complete: transition to crafting phase
