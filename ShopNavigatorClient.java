@@ -726,14 +726,14 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     // Check current inventory before next batch
                     recalcInventory(client);
                     int currentlyOwned = 0;
-                    Item target = getTargetItem();
-                    if (target != null) {
-                        if (target == NOTE_BLOCK) {
+                    Item targetItem = getTargetItem();
+                    if (targetItem != null) {
+                        if (targetItem == NOTE_BLOCK) {
                             currentlyOwned = noteBlocks;
-                        } else if (target == IRON_BLOCK) {
+                        } else if (targetItem == IRON_BLOCK) {
                             currentlyOwned = ironBlocks;
                         } else {
-                            currentlyOwned = countItem(client.player.getInventory(), target);
+                            currentlyOwned = countItem(client.player.getInventory(), targetItem);
                         }
                     }
                     
@@ -760,14 +760,14 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         // Check current inventory before stage 2
                         recalcInventory(client);
                         int currentlyOwned = 0;
-                        Item target = getTargetItem();
-                        if (target != null) {
-                            if (target == NOTE_BLOCK) {
+                        Item targetItem = getTargetItem();
+                        if (targetItem != null) {
+                            if (targetItem == NOTE_BLOCK) {
                                 currentlyOwned = noteBlocks;
-                            } else if (target == IRON_BLOCK) {
+                            } else if (targetItem == IRON_BLOCK) {
                                 currentlyOwned = ironBlocks;
                             } else {
-                                currentlyOwned = countItem(client.player.getInventory(), target);
+                                currentlyOwned = countItem(client.player.getInventory(), targetItem);
                             }
                         }
                         
