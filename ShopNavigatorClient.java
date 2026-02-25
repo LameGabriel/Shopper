@@ -1785,6 +1785,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
             // If we already have enough nuggets, skip conversions.
             int nuggetShortNow = Math.max(0, reqNuggets - nuggets);
             int ingotsToNuggetsNeed = (int) Math.ceil(nuggetShortNow / 9.0);
+            // IMPORTANT: Also check if we have room for the nuggets that will be created
+            // Each ingot converts to 9 nuggets, so we need 9x room
+            int maxIngotsBasedOnRoom = nuggetStackRoom / NUGGETS_PER_INGOT;
+            ingotsToNuggetsNeed = Math.min(ingotsToNuggetsNeed, maxIngotsBasedOnRoom);
             planIngotsToNuggetsRemaining = Math.min(planIngotsToNuggetsRemaining, Math.max(0, ingotsToNuggetsNeed));
 
             // Build/execute conversion queue: one operation at a time, ACKed between actions.
