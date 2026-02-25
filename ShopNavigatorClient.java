@@ -721,99 +721,20 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     cooldown(CONFIG.cooldownQuantityMs);
                 } else if (CONFIG.usePlan && planIndex + 1 < currentPlanQuantities.length) {
                     planIndex++;
-                    int plannedQuantity = currentPlanQuantities[planIndex];
-                    
-                    // Check current inventory before next batch
-                    recalcInventory(client);
-                    int currentlyOwned = 0;
-                    Item targetItem = getTargetItem();
-                    if (targetItem != null) {
-                        if (targetItem == NOTE_BLOCK) {
-                            currentlyOwned = noteBlocks;
-                        } else if (targetItem == IRON_BLOCK) {
-                            currentlyOwned = ironBlocks;
-                        } else {
-                            currentlyOwned = countItem(client.player.getInventory(), targetItem);
-                        }
-                    }
-                    
-                    // Adjust next batch quantity based on what we already have
-                    activeQuantity = Math.max(0, plannedQuantity - currentlyOwned);
+                    activeQuantity = currentPlanQuantities[planIndex];
                     activeRemaining = activeQuantity;
                     loggedMissingStageItems = false;
-                    
-                    if (activeQuantity <= 0) {
-                        // Already have enough items - check if more batches remain
-                        msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; already have enough items (" + currentlyOwned + "), skipping batch");
-                        
-                        // Check if this is the last batch
-                        if (planIndex + 1 >= currentPlanQuantities.length) {
-                            // Last batch of this stage - check if stage 2 exists
-                            if (CONFIG.useTwoStagePlan && currentStage == 1) {
-                                // Move to stage 2
-                                currentStage = 2;
-                                loadStageConfig(currentStage);
-                                planIndex = 0;
-                                int stage2PlannedQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
-                                
-                                recalcInventory(client);
-                                int stage2CurrentlyOwned = 0;
-                                Item stage2TargetItem = getTargetItem();
-                                if (stage2TargetItem != null) {
-                                    if (stage2TargetItem == NOTE_BLOCK) {
-                                        stage2CurrentlyOwned = noteBlocks;
-                                    } else if (stage2TargetItem == IRON_BLOCK) {
-                                        stage2CurrentlyOwned = ironBlocks;
-                                    } else {
-                                        stage2CurrentlyOwned = countItem(client.player.getInventory(), stage2TargetItem);
-                                    }
-                                }
-                                
-                                activeQuantity = Math.max(0, stage2PlannedQuantity - stage2CurrentlyOwned);
-                                activeRemaining = activeQuantity;
-                                
-                                if (activeQuantity <= 0) {
-                                    // Already have enough for stage 2 too - go to crafting
-                                    msg(client, "Stage 2 also has enough items (" + stage2CurrentlyOwned + "), going to crafting");
-                                    done(client, "All items already available");
-                                    forceCloseScreen(client);
-                                    loopPhase = LoopPhase.WAIT_CLOSE_SHOP;
-                                    phaseReadyAtMs = System.currentTimeMillis() + 1000;
-                                    nextActionAtMs = phaseReadyAtMs;
-                                } else {
-                                    msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + 
-                                            " qty=" + activeQuantity + " (have " + stage2CurrentlyOwned + ", need " + stage2PlannedQuantity + ")");
-                                    setState(State.SEND_SHOP);
-                                    cooldown(CONFIG.cooldownSendShopMs);
-                                }
-                            } else {
-                                // No more stages - go to crafting
-                                done(client, "All batches completed with existing inventory");
-                                forceCloseScreen(client);
-                                loopPhase = LoopPhase.WAIT_CLOSE_SHOP;
-                                phaseReadyAtMs = System.currentTimeMillis() + 1000;
-                                nextActionAtMs = phaseReadyAtMs;
-                            }
-                        } else {
-                            // More batches remain - continue to next iteration
-                            // This will be handled in the next CLICK_QUANTITY execution
-                            setState(State.SCAN_PAGE_FOR_ITEM);
-                            cooldown(CONFIG.cooldownQuantityMs);
-                        }
-                    } else {
-                        msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; next qty " + activeQuantity + " (have " + currentlyOwned + ", need " + plannedQuantity + ") — reopening shop");
-                        setState(State.SEND_SHOP); // reopen in case GUI closed after purchase
-                        cooldown(CONFIG.cooldownSendShopMs);
-                    }
+                    msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; next qty " + activeQuantity + " — reopening shop");
+                    setState(State.SEND_SHOP); // reopen in case GUI closed after purchase
+                    cooldown(CONFIG.cooldownSendShopMs);
                 } else {
                     // Stage completion
                     if (CONFIG.useTwoStagePlan && currentStage == 1) {
                         currentStage = 2;
                         loadStageConfig(currentStage);
                         planIndex = 0;
-                        int plannedQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
                         
-                        // Check current inventory before stage 2
+                        // Check current inventory before stage 2 to avoid buying if already have items
                         recalcInventory(client);
                         int currentlyOwned = 0;
                         Item targetItem = getTargetItem();
@@ -827,23 +748,28 @@ public class ShopNavigatorClient implements ClientModInitializer {
                             }
                         }
                         
-                        // Adjust stage 2 quantity based on what we already have
-                        activeQuantity = Math.max(0, plannedQuantity - currentlyOwned);
-                        activeRemaining = activeQuantity;
-                        loggedMissingStageItems = false;
+                        // For stage 2, check against TOTAL needed across all batches, not just first batch
+                        int totalNeeded = 0;
+                        for (int qty : currentPlanQuantities) {
+                            totalNeeded += qty;
+                        }
                         
-                        if (activeQuantity <= 0) {
-                            // Already have enough items for stage 2 - go to crafting
+                        if (currentlyOwned >= totalNeeded) {
+                            // Already have enough items for entire stage 2 - go to crafting
                             msg(client, "Stage 1 complete. Stage 2 target=" + currentTargetItemId + 
-                                    " - already have enough items (" + currentlyOwned + "), going to crafting");
+                                    " - already have enough items (" + currentlyOwned + " >= " + totalNeeded + "), going to crafting");
                             done(client, "All items already available");
                             forceCloseScreen(client);
                             loopPhase = LoopPhase.WAIT_CLOSE_SHOP;
                             phaseReadyAtMs = System.currentTimeMillis() + 1000;
                             nextActionAtMs = phaseReadyAtMs;
                         } else {
+                            // Need to shop for stage 2 - start with first batch
+                            activeQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
+                            activeRemaining = activeQuantity;
+                            loggedMissingStageItems = false;
                             msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + 
-                                    " qty=" + activeQuantity + " (have " + currentlyOwned + ", need " + plannedQuantity + ")");
+                                    " qty=" + activeQuantity + " (have " + currentlyOwned + ", need total " + totalNeeded + ")");
                             setState(State.SEND_SHOP);
                             cooldown(CONFIG.cooldownSendShopMs);
                         }
