@@ -478,18 +478,54 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
 
     private void start(MinecraftClient client) {
-        setState(State.SEND_SHOP);
         lastPageNumber = -1;
         nextActionAtMs = 0;
         currentStage = 1;
         loadStageConfig(currentStage);
         planIndex = 0;
-        activeQuantity = CONFIG.usePlan ? currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)] : CONFIG.targetQuantity;
+        
+        // Calculate initial shopping quantity based on what's already in inventory
+        int plannedQuantity = CONFIG.usePlan ? currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)] : CONFIG.targetQuantity;
+        
+        // Check current inventory to avoid buying too many items
+        recalcInventory(client);
+        int currentlyOwned = 0;
+        
+        // Determine what item we're shopping for and how much we already have
+        Item targetItem = getTargetItem();
+        if (targetItem != null) {
+            if (targetItem == NOTE_BLOCK) {
+                currentlyOwned = noteBlocks;
+            } else if (targetItem == IRON_BLOCK) {
+                currentlyOwned = ironBlocks;
+            } else {
+                // For other items, count them in inventory
+                currentlyOwned = countItem(client.player.getInventory(), targetItem);
+            }
+        }
+        
+        // Adjust quantity based on what we already have
+        // Only buy what we don't already have (up to the planned amount for this batch)
+        activeQuantity = Math.max(0, plannedQuantity - currentlyOwned);
         activeRemaining = activeQuantity;
+        
         loggedMissingStageItems = false;
         stateTimeoutRetries = 0;
-        msg(client, "ShopNavigator: Started. Stage " + currentStage + " Target=" + currentTargetItemId + " qty=" + activeQuantity +
-                (CONFIG.usePlan ? " (plan " + currentPlanQuantities.length + " batches)" : ""));
+        
+        if (activeQuantity <= 0) {
+            msg(client, "ShopNavigator: Started. Stage " + currentStage + " Target=" + currentTargetItemId + 
+                    " - Already have " + currentlyOwned + " items, skipping to crafting.");
+            // Skip shopping, go directly to crafting
+            done(client, "Already have enough items for stage " + currentStage);
+            loopPhase = LoopPhase.WAIT_CLOSE_SHOP;
+            phaseReadyAtMs = System.currentTimeMillis() + 1000;
+            nextActionAtMs = phaseReadyAtMs;
+        } else {
+            setState(State.SEND_SHOP);
+            msg(client, "ShopNavigator: Started. Stage " + currentStage + " Target=" + currentTargetItemId + 
+                    " qty=" + activeQuantity + " (have " + currentlyOwned + ", need " + plannedQuantity + ")" +
+                    (CONFIG.usePlan ? " (plan " + currentPlanQuantities.length + " batches)" : ""));
+        }
     }
 
     private void stop(MinecraftClient client, String reason) {
@@ -685,10 +721,32 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     cooldown(CONFIG.cooldownQuantityMs);
                 } else if (CONFIG.usePlan && planIndex + 1 < currentPlanQuantities.length) {
                     planIndex++;
-                    activeQuantity = currentPlanQuantities[planIndex];
+                    int plannedQuantity = currentPlanQuantities[planIndex];
+                    
+                    // Check current inventory before next batch
+                    recalcInventory(client);
+                    int currentlyOwned = 0;
+                    Item target = getTargetItem();
+                    if (target != null) {
+                        if (target == NOTE_BLOCK) {
+                            currentlyOwned = noteBlocks;
+                        } else if (target == IRON_BLOCK) {
+                            currentlyOwned = ironBlocks;
+                        } else {
+                            currentlyOwned = countItem(client.player.getInventory(), target);
+                        }
+                    }
+                    
+                    // Adjust next batch quantity based on what we already have
+                    activeQuantity = Math.max(0, plannedQuantity - currentlyOwned);
                     activeRemaining = activeQuantity;
                     loggedMissingStageItems = false;
-                    msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; next qty " + activeQuantity + " — reopening shop");
+                    
+                    if (activeQuantity <= 0) {
+                        msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; already have enough items (" + currentlyOwned + "), skipping next batch");
+                    } else {
+                        msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; next qty " + activeQuantity + " (have " + currentlyOwned + ", need " + plannedQuantity + ") — reopening shop");
+                    }
                     setState(State.SEND_SHOP); // reopen in case GUI closed after purchase
                     cooldown(CONFIG.cooldownSendShopMs);
                 } else {
@@ -697,10 +755,29 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         currentStage = 2;
                         loadStageConfig(currentStage);
                         planIndex = 0;
-                        activeQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
+                        int plannedQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
+                        
+                        // Check current inventory before stage 2
+                        recalcInventory(client);
+                        int currentlyOwned = 0;
+                        Item target = getTargetItem();
+                        if (target != null) {
+                            if (target == NOTE_BLOCK) {
+                                currentlyOwned = noteBlocks;
+                            } else if (target == IRON_BLOCK) {
+                                currentlyOwned = ironBlocks;
+                            } else {
+                                currentlyOwned = countItem(client.player.getInventory(), target);
+                            }
+                        }
+                        
+                        // Adjust stage 2 quantity based on what we already have
+                        activeQuantity = Math.max(0, plannedQuantity - currentlyOwned);
                         activeRemaining = activeQuantity;
                         loggedMissingStageItems = false;
-                        msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + " qty=" + activeQuantity);
+                        
+                        msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + 
+                                " qty=" + activeQuantity + " (have " + currentlyOwned + ", need " + plannedQuantity + ")");
                         setState(State.SEND_SHOP);
                         cooldown(CONFIG.cooldownSendShopMs);
                     } else {
