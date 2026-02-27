@@ -116,7 +116,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private State lastState = State.IDLE;
     private long lastStateChangeMs = 0;
     private int stateTimeoutRetries = 0;
-    private static final long STATE_TIMEOUT_MS = 10000; // 10 seconds
+    private static final long STATE_TIMEOUT_MS = 7000; // 7 seconds (reduced from 10 for faster stuck detection)
     private static final int MAX_STATE_TIMEOUT_RETRIES = 3;
 
     private int lastPageNumber = -1;
@@ -483,6 +483,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         currentStage = 1;
         loadStageConfig(currentStage);
         planIndex = 0;
+        stateTimeoutRetries = 0; // Reset retry counter when starting fresh shopping
         
         // Calculate initial shopping quantity based on what's already in inventory
         int plannedQuantity = CONFIG.usePlan ? currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)] : CONFIG.targetQuantity;
@@ -724,6 +725,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     activeQuantity = currentPlanQuantities[planIndex];
                     activeRemaining = activeQuantity;
                     loggedMissingStageItems = false;
+                    stateTimeoutRetries = 0; // Reset retry counter on successful batch completion
                     msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; next qty " + activeQuantity + " — reopening shop");
                     setState(State.SEND_SHOP); // reopen in case GUI closed after purchase
                     cooldown(CONFIG.cooldownSendShopMs);
@@ -768,6 +770,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                             activeQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
                             activeRemaining = activeQuantity;
                             loggedMissingStageItems = false;
+                            stateTimeoutRetries = 0; // Reset retry counter on successful stage transition
                             msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + 
                                     " qty=" + activeQuantity + " (have " + currentlyOwned + ", need total " + totalNeeded + ")");
                             setState(State.SEND_SHOP);
