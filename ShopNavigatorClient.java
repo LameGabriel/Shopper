@@ -1278,14 +1278,17 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 return true;
             }
             // Slow down for batch 14 onwards to give server more time to recognize conversions
-            long conversionTimeout = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 200 : 20;
+            // Increased timeout from 200ms to 500ms to handle server lag better
+            long conversionTimeout = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 500 : 20;
             if (now - pendingSinceMs < conversionTimeout) {
                 setCraftCooldown();
                 return true;
             }
-            if (pendingRetries >= 4) {
+            // Increased max retries from 4 to 10 for batch 14+ to handle server lag
+            int maxRetries = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 10 : 4;
+            if (pendingRetries >= maxRetries) {
                 String kind = pendingConversion.kind == ConversionKind.BREAK_BLOCK_TO_INGOTS ? "break blocks" : "convert ingots to nuggets";
-                autoPauseOnConversionFailure(client, "failed to " + kind + " after retries; ingotRoom=" + ingotStackRoom + " nuggetRoom=" + nuggetStackRoom + " emptySlots=" + emptySlots);
+                autoPauseOnConversionFailure(client, "failed to " + kind + " after " + maxRetries + " retries; ingotRoom=" + ingotStackRoom + " nuggetRoom=" + nuggetStackRoom + " emptySlots=" + emptySlots);
                 return true;
             }
             if (!executeConversionOp(client, h, pendingConversion)) {
@@ -1902,15 +1905,20 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
             // Build/execute conversion queue: one operation at a time, ACKed between actions.
             if (conversionQueue.isEmpty() && pendingConversion == null) {
+                // For batch 14+, use much smaller units to avoid server thinking we're cheating
+                // Smaller operations = more time for server to process = less "Invalid Operations" kicks
+                int blockUnits = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 8 : BLOCKS_TO_INGOTS_UNITS_PER_OP;
+                int ingotUnits = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 8 : INGOTS_TO_NUGGETS_UNITS_PER_OP;
+                
                 int blocksLeft = planBlocksRemaining;
                 while (blocksLeft > 0) {
-                    int units = Math.min(BLOCKS_TO_INGOTS_UNITS_PER_OP, blocksLeft);
+                    int units = Math.min(blockUnits, blocksLeft);
                     conversionQueue.addLast(new ConversionOp(ConversionKind.BREAK_BLOCK_TO_INGOTS, units));
                     blocksLeft -= units;
                 }
                 int nuggetsLeft = planIngotsToNuggetsRemaining;
                 while (nuggetsLeft > 0) {
-                    int units = Math.min(INGOTS_TO_NUGGETS_UNITS_PER_OP, nuggetsLeft);
+                    int units = Math.min(ingotUnits, nuggetsLeft);
                     conversionQueue.addLast(new ConversionOp(ConversionKind.INGOT_TO_NUGGETS, units));
                     nuggetsLeft -= units;
                 }
