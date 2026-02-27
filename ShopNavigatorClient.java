@@ -1905,10 +1905,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
             // Build/execute conversion queue: one operation at a time, ACKed between actions.
             if (conversionQueue.isEmpty() && pendingConversion == null) {
-                // For batch 14+, use much smaller units to avoid server thinking we're cheating
-                // Smaller operations = more time for server to process = less "Invalid Operations" kicks
-                int blockUnits = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 8 : BLOCKS_TO_INGOTS_UNITS_PER_OP;
-                int ingotUnits = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 8 : INGOTS_TO_NUGGETS_UNITS_PER_OP;
+                // For batch 14 ONLY (the last batch), use smaller units for extra safety
+                // User feedback: Keep 64 units for all batches except the very last one
+                int blockUnits = craftBatchIndex == 14 ? 8 : BLOCKS_TO_INGOTS_UNITS_PER_OP;
+                int ingotUnits = craftBatchIndex == 14 ? 8 : INGOTS_TO_NUGGETS_UNITS_PER_OP;
                 
                 int blocksLeft = planBlocksRemaining;
                 while (blocksLeft > 0) {
