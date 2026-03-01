@@ -348,7 +348,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 break;
                 
             case OPENING_GTS:
-                sendCommand(client, CONFIG.gtsCommand);
+                if (client.player != null && client.player.networkHandler != null) {
+                    client.player.networkHandler.sendChatCommand(CONFIG.gtsCommand);
+                    msg(client, "Sent /" + CONFIG.gtsCommand + " to open GTS");
+                }
                 gtsState = GTSState.WAITING_FOR_GUI;
                 gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
                 break;
@@ -422,7 +425,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 }
                 
                 // Click the item to purchase
-                clickSlot(client, handler, i, 0, SlotActionType.PICKUP);
+                clickSlot(client, handler, i);
+                msg(client, "GTS: Purchasing " + gtsTargetItem + " for $" + gtsTargetPrice);
                 return true;
             }
         }
