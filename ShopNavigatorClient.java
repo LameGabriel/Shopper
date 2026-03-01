@@ -463,8 +463,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
         }
         
         // Try to extract price from display name
-        if (stack.hasCustomName()) {
-            String name = stack.getName().getString();
+        String name = stack.getName().getString();
+        if (name != null && !name.isEmpty()) {
             int price = extractPrice(name);
             if (price > 0) {
                 return price;
@@ -474,7 +474,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         // Try to extract price from lore/tooltip
         if (client.player != null) {
             try {
-                var tooltip = stack.getTooltip(client.player, net.minecraft.client.item.TooltipContext.BASIC);
+                var tooltip = stack.getTooltip(client.player, net.minecraft.item.tooltip.TooltipType.BASIC);
                 for (var line : tooltip) {
                     String text = line.getString();
                     int price = extractPrice(text);
