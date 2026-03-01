@@ -452,12 +452,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
      * @return The actual price in dollars, or -1 if price cannot be determined
      */
     private int verifyGTSPrice(MinecraftClient client, GenericContainerScreenHandler handler) {
-        if (handler == null || handler.slots.size() <= 9) {
+        if (handler == null || handler.slots.size() <= 13) {
             return -1;
         }
         
-        // Get the item from slot 9 (the item we just clicked)
-        ItemStack stack = handler.slots.get(9).getStack();
+        // Get the item from slot 13 (confirmation GUI - has item name, seller, and price)
+        ItemStack stack = handler.slots.get(13).getStack();
         if (stack == null || stack.isEmpty()) {
             return -1;
         }
