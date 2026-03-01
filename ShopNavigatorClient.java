@@ -2395,7 +2395,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public boolean gtsEnabled = false;
         public int gtsMaxPrice = 1000;
         public int gtsHardCap = 1500;
-        public long gtsCooldownMs = 500;
+        public long gtsCooldownMs = 100;
         public String gtsCommand = "gts";
 
         private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
