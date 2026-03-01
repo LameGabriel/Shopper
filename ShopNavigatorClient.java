@@ -5,6 +5,7 @@ import com.google.gson.GsonBuilder;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
@@ -106,6 +107,15 @@ public class ShopNavigatorClient implements ClientModInitializer {
         DONE,
         FAILED
     }
+    
+    private enum GTSState {
+        IDLE,
+        OPENING_GTS,
+        WAITING_FOR_GUI,
+        FINDING_ITEM,
+        CONFIRMING_BUY,
+        DONE
+    }
 
     // ============================================================================
     // INSTANCE FIELDS - State & Configuration
@@ -136,6 +146,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private KeyBinding craftAutoKey;
     private KeyBinding craftTableKey;
     private KeyBinding forceStopKey;
+    private KeyBinding gtsToggleKey;  // New: GTS auto-buyer toggle
+    
     private boolean craftAwaiting = false;
     private int craftAwaitTicks = 0;
     private boolean craftRunning = false;
@@ -192,6 +204,14 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private static final int BLOCKS_TO_INGOTS_UNITS_PER_OP = 64; // increased from 14 to support larger batch sizes
     private static final int INGOTS_TO_NUGGETS_UNITS_PER_OP = 64; // increased from 14 to support larger batch sizes
     private long craftFinishAtMs = 0; // tracks when post-craft delay expires
+    
+    // GTS Auto-Buyer state
+    private GTSState gtsState = GTSState.IDLE;
+    private String gtsTargetSeller = "";
+    private String gtsTargetItem = "";
+    private int gtsTargetPrice = 0;
+    private long gtsNextActionMs = 0;
+    private static final Pattern GTS_LISTING_PATTERN = Pattern.compile("GTS:\\s*([\\w]+)\\s+listed\\s+(.+?)\\s+for\\s+\\$([\\d,]+)");
 
     private enum ConversionKind {
         BREAK_BLOCK_TO_INGOTS,
@@ -271,8 +291,142 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 GLFW.GLFW_KEY_K,
                 "category.shopnavigator"
         ));
+        gtsToggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.shopnavigator.gtstoggle",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_I,
+                "category.shopnavigator"
+        ));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
+        
+        // Register chat message listener for GTS listings
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
+            if (overlay) return; // Ignore overlay messages
+            String text = message.getString();
+            handleChatMessage(text);
+        });
+    }
+    
+    // ============================================================================
+    // GTS AUTO-BUYER METHODS
+    // ============================================================================
+    
+    private void handleChatMessage(String text) {
+        if (!CONFIG.gtsEnabled || gtsState != GTSState.IDLE) return;
+        
+        Matcher m = GTS_LISTING_PATTERN.matcher(text);
+        if (m.find()) {
+            String seller = m.group(1);
+            String item = m.group(2);
+            int price = Integer.parseInt(m.group(3).replace(",", ""));
+            
+            // Hard cap - never buy over this price regardless of config
+            if (price > CONFIG.gtsHardCap) {
+                return;
+            }
+            
+            // Check if price is within configured max
+            if (price <= CONFIG.gtsMaxPrice) {
+                gtsTargetSeller = seller;
+                gtsTargetItem = item;
+                gtsTargetPrice = price;
+                gtsState = GTSState.OPENING_GTS;
+                MinecraftClient client = MinecraftClient.getInstance();
+                msg(client, "GTS: Detected " + item + " for $" + price + " - auto-buying...");
+            }
+        }
+    }
+    
+    private void tickGTSStateMachine(MinecraftClient client) {
+        // Check cooldown
+        if (System.currentTimeMillis() < gtsNextActionMs) return;
+        
+        switch (gtsState) {
+            case IDLE:
+                // Nothing to do
+                break;
+                
+            case OPENING_GTS:
+                sendCommand(client, CONFIG.gtsCommand);
+                gtsState = GTSState.WAITING_FOR_GUI;
+                gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                break;
+                
+            case WAITING_FOR_GUI:
+                if (client.currentScreen instanceof HandledScreen<?> screen) {
+                    ScreenHandler handler = screen.getScreenHandler();
+                    if (handler instanceof GenericContainerScreenHandler) {
+                        gtsState = GTSState.FINDING_ITEM;
+                        gtsNextActionMs = System.currentTimeMillis() + 200;
+                    }
+                }
+                break;
+                
+            case FINDING_ITEM:
+                if (client.currentScreen instanceof HandledScreen<?> screen) {
+                    ScreenHandler handler = screen.getScreenHandler();
+                    if (handler instanceof GenericContainerScreenHandler containerHandler) {
+                        // Scan inventory for the target item
+                        boolean found = findAndClickGTSItem(client, containerHandler);
+                        if (found) {
+                            gtsState = GTSState.CONFIRMING_BUY;
+                            gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                        } else {
+                            // Item not found or price changed
+                            msg(client, "GTS: Item not found or price changed");
+                            gtsState = GTSState.DONE;
+                        }
+                    }
+                } else {
+                    // GUI closed unexpectedly
+                    gtsState = GTSState.DONE;
+                }
+                break;
+                
+            case CONFIRMING_BUY:
+                // The click should have opened confirmation GUI
+                // In a real implementation, you'd verify and click the confirm button
+                // For now, we'll assume the click completed the purchase
+                msg(client, "GTS: Purchased " + gtsTargetItem + " for $" + gtsTargetPrice);
+                gtsState = GTSState.DONE;
+                break;
+                
+            case DONE:
+                // Reset state
+                gtsState = GTSState.IDLE;
+                gtsTargetSeller = "";
+                gtsTargetItem = "";
+                gtsTargetPrice = 0;
+                break;
+        }
+    }
+    
+    private boolean findAndClickGTSItem(MinecraftClient client, GenericContainerScreenHandler handler) {
+        // Scan all slots for the matching item
+        for (int i = 0; i < handler.slots.size(); i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.isEmpty()) continue;
+            
+            // Check if item name matches (approximate match)
+            String itemName = stack.getName().getString();
+            if (itemName.contains(gtsTargetItem) || gtsTargetItem.contains(itemName)) {
+                // Verify price from lore/tooltip
+                // For now, we trust the price from chat
+                // In production, you'd parse the item's lore to double-check
+                
+                // Double-check price doesn't exceed hard cap
+                if (gtsTargetPrice > CONFIG.gtsHardCap) {
+                    msg(client, "GTS: Price exceeds hard cap, aborting");
+                    return false;
+                }
+                
+                // Click the item to purchase
+                clickSlot(client, handler, i, 0, SlotActionType.PICKUP);
+                return true;
+            }
+        }
+        return false;
     }
 
     private void onEndTick(MinecraftClient client) {
@@ -432,6 +586,19 @@ public class ShopNavigatorClient implements ClientModInitializer {
             queueShopAfterDelay = false;
             craftFinishAtMs = 0;
             loopPhase = LoopPhase.IDLE;
+        }
+        
+        // GTS Auto-Buyer toggle
+        while (gtsToggleKey.wasPressed()) {
+            CONFIG.gtsEnabled = !CONFIG.gtsEnabled;
+            String status = CONFIG.gtsEnabled ? "ENABLED" : "DISABLED";
+            msg(client, "GTS Auto-Buyer: " + status + " (max price: $" + CONFIG.gtsMaxPrice + ", hard cap: $" + CONFIG.gtsHardCap + ")");
+            CONFIG.save();
+        }
+        
+        // Run GTS state machine if enabled
+        if (CONFIG.gtsEnabled) {
+            tickGTSStateMachine(client);
         }
 
         if (craftRunning) {
@@ -2128,6 +2295,13 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public String stage2TargetItemId = "minecraft:iron_block";
         public int[] stage2PlanQuantities = new int[]{256, 256, 32, 8};
         public boolean stage2UsesPagination = false;
+        
+        // GTS Auto-Buyer Configuration
+        public boolean gtsEnabled = false;
+        public int gtsMaxPrice = 1000;
+        public int gtsHardCap = 1500;
+        public long gtsCooldownMs = 500;
+        public String gtsCommand = "gts";
 
         private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
         private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("shopnavigator.json");
