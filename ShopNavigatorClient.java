@@ -367,32 +367,40 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 break;
                 
             case FINDING_ITEM:
-                if (client.currentScreen instanceof HandledScreen<?> screen) {
-                    ScreenHandler handler = screen.getScreenHandler();
-                    if (handler instanceof GenericContainerScreenHandler containerHandler) {
-                        // Scan inventory for the target item
-                        boolean found = findAndClickGTSItem(client, containerHandler);
-                        if (found) {
+                if (System.currentTimeMillis() >= gtsNextActionMs) {
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        ScreenHandler handler = screen.getScreenHandler();
+                        if (handler instanceof GenericContainerScreenHandler containerHandler) {
+                            // Click slot 9 (first purchasable item in second row)
+                            // First row (slots 0-8) contains settings/navigation
+                            clickSlot(client, containerHandler, 9);
+                            msg(client, "GTS: Clicking slot 9 to select item");
                             gtsState = GTSState.CONFIRMING_BUY;
                             gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
-                        } else {
-                            // Item not found or price changed
-                            msg(client, "GTS: Item not found or price changed");
-                            gtsState = GTSState.DONE;
                         }
+                    } else {
+                        // GUI closed unexpectedly
+                        gtsState = GTSState.DONE;
                     }
-                } else {
-                    // GUI closed unexpectedly
-                    gtsState = GTSState.DONE;
                 }
                 break;
                 
             case CONFIRMING_BUY:
-                // The click should have opened confirmation GUI
-                // In a real implementation, you'd verify and click the confirm button
-                // For now, we'll assume the click completed the purchase
-                msg(client, "GTS: Purchased " + gtsTargetItem + " for $" + gtsTargetPrice);
-                gtsState = GTSState.DONE;
+                if (System.currentTimeMillis() >= gtsNextActionMs) {
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        ScreenHandler handler = screen.getScreenHandler();
+                        if (handler instanceof GenericContainerScreenHandler containerHandler) {
+                            // Click slot 11 to confirm the purchase
+                            clickSlot(client, containerHandler, 11);
+                            msg(client, "GTS: Clicking slot 11 to confirm purchase of " + gtsTargetItem + " for $" + gtsTargetPrice);
+                            gtsState = GTSState.DONE;
+                            gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                        }
+                    } else {
+                        // GUI closed unexpectedly
+                        gtsState = GTSState.DONE;
+                    }
+                }
                 break;
                 
             case DONE:
@@ -405,34 +413,6 @@ public class ShopNavigatorClient implements ClientModInitializer {
         }
     }
     
-    private boolean findAndClickGTSItem(MinecraftClient client, GenericContainerScreenHandler handler) {
-        // Scan all slots for the matching item
-        for (int i = 0; i < handler.slots.size(); i++) {
-            ItemStack stack = handler.getSlot(i).getStack();
-            if (stack.isEmpty()) continue;
-            
-            // Check if item name matches (approximate match)
-            String itemName = stack.getName().getString();
-            if (itemName.contains(gtsTargetItem) || gtsTargetItem.contains(itemName)) {
-                // Verify price from lore/tooltip
-                // For now, we trust the price from chat
-                // In production, you'd parse the item's lore to double-check
-                
-                // Double-check price doesn't exceed hard cap
-                if (gtsTargetPrice > CONFIG.gtsHardCap) {
-                    msg(client, "GTS: Price exceeds hard cap, aborting");
-                    return false;
-                }
-                
-                // Click the item to purchase
-                clickSlot(client, handler, i);
-                msg(client, "GTS: Purchasing " + gtsTargetItem + " for $" + gtsTargetPrice);
-                return true;
-            }
-        }
-        return false;
-    }
-
     private void onEndTick(MinecraftClient client) {
         if (client.player == null || client.world == null) return;
 
