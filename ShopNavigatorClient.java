@@ -113,6 +113,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         OPENING_GTS,
         WAITING_FOR_GUI,
         FINDING_ITEM,
+        VERIFYING_PRICE,  // Verify price from GUI before confirming
         CONFIRMING_BUY,
         DONE
     }
@@ -375,7 +376,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                             // First row (slots 0-8) contains settings/navigation
                             clickSlot(client, containerHandler, 9);
                             msg(client, "GTS: Clicking slot 9 to select item");
-                            gtsState = GTSState.CONFIRMING_BUY;
+                            gtsState = GTSState.VERIFYING_PRICE;  // Changed to verify price before buying
                             gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
                         }
                     } else {
@@ -384,7 +385,39 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     }
                 }
                 break;
-                
+
+            case VERIFYING_PRICE:
+                if (System.currentTimeMillis() >= gtsNextActionMs) {
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        ScreenHandler handler = screen.getScreenHandler();
+                        if (handler instanceof GenericContainerScreenHandler containerHandler) {
+                            // Verify the actual price from the GUI before confirming
+                            int actualPrice = verifyGTSPrice(client, containerHandler);
+                            
+                            if (actualPrice <= 0) {
+                                // Could not read price - cancel for safety
+                                msg(client, "GTS: CANCELLED - Could not verify price in GUI (safety measure)");
+                                forceCloseScreen(client);
+                                gtsState = GTSState.IDLE;
+                            } else if (actualPrice > CONFIG.gtsHardCap) {
+                                // Price exceeds hard cap - cancel to prevent scam
+                                msg(client, String.format("GTS: CANCELLED - Price $%,d exceeds hard cap of $%,d", actualPrice, CONFIG.gtsHardCap));
+                                forceCloseScreen(client);
+                                gtsState = GTSState.IDLE;
+                            } else {
+                                // Price verified and within limit - safe to proceed
+                                msg(client, String.format("GTS: Price verified at $%,d (within $%,d limit)", actualPrice, CONFIG.gtsHardCap));
+                                gtsState = GTSState.CONFIRMING_BUY;
+                                gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                            }
+                        }
+                    } else {
+                        // GUI closed unexpectedly
+                        gtsState = GTSState.DONE;
+                    }
+                }
+                break;
+
             case CONFIRMING_BUY:
                 if (System.currentTimeMillis() >= gtsNextActionMs) {
                     if (client.currentScreen instanceof HandledScreen<?> screen) {
@@ -411,6 +444,84 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 gtsTargetPrice = 0;
                 break;
         }
+    }
+    
+    /**
+     * Verify the actual price from the GTS GUI to prevent scams.
+     * Reads the item from slot 9 and parses the price from its display name or lore.
+     * @return The actual price in dollars, or -1 if price cannot be determined
+     */
+    private int verifyGTSPrice(MinecraftClient client, GenericContainerScreenHandler handler) {
+        if (handler == null || handler.slots.size() <= 9) {
+            return -1;
+        }
+        
+        // Get the item from slot 9 (the item we just clicked)
+        ItemStack stack = handler.slots.get(9).getStack();
+        if (stack == null || stack.isEmpty()) {
+            return -1;
+        }
+        
+        // Try to extract price from display name
+        if (stack.hasCustomName()) {
+            String name = stack.getName().getString();
+            int price = extractPrice(name);
+            if (price > 0) {
+                return price;
+            }
+        }
+        
+        // Try to extract price from lore/tooltip
+        if (client.player != null) {
+            try {
+                var tooltip = stack.getTooltip(client.player, net.minecraft.client.item.TooltipContext.BASIC);
+                for (var line : tooltip) {
+                    String text = line.getString();
+                    int price = extractPrice(text);
+                    if (price > 0) {
+                        return price;
+                    }
+                }
+            } catch (Exception e) {
+                // Tooltip extraction failed
+            }
+        }
+        
+        return -1; // Could not find price
+    }
+    
+    /**
+     * Extract a price value from text, handling various formats like $1,000 or 1000
+     * @param text The text to parse
+     * @return The price as an integer, or -1 if no price found
+     */
+    private int extractPrice(String text) {
+        if (text == null || text.isEmpty()) {
+            return -1;
+        }
+        
+        // Remove Minecraft color codes (§x)
+        String clean = text.replaceAll("§.", "");
+        
+        // Look for price patterns: $1,000 or $1000 or 1,000 or 1000
+        // Try to match numbers that look like prices
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\\$?([\\d,]+)");
+        java.util.regex.Matcher matcher = pattern.matcher(clean);
+        
+        while (matcher.find()) {
+            String priceStr = matcher.group(1).replace(",", "");
+            try {
+                int price = Integer.parseInt(priceStr);
+                // Sanity check: price should be reasonable (between $1 and $1,000,000)
+                if (price >= 1 && price <= 1000000) {
+                    return price;
+                }
+            } catch (NumberFormatException e) {
+                // Not a valid number, continue searching
+            }
+        }
+        
+        return -1; // No price found
     }
     
     private void onEndTick(MinecraftClient client) {
