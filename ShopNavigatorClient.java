@@ -472,9 +472,9 @@ public class ShopNavigatorClient implements ClientModInitializer {
         }
         
         // Try to extract price from lore/tooltip
-        if (client.player != null) {
+        if (client.player != null && client.world != null) {
             try {
-                var tooltip = stack.getTooltip(net.minecraft.item.Item.TooltipContext.Default.INSTANCE, client.player, net.minecraft.item.tooltip.TooltipType.BASIC);
+                var tooltip = stack.getTooltip(net.minecraft.item.Item.TooltipContext.create(client.world), client.player, net.minecraft.item.tooltip.TooltipType.BASIC);
                 for (var line : tooltip) {
                     String text = line.getString();
                     int price = extractPrice(text);
