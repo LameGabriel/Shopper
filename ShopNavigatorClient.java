@@ -233,6 +233,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private String balanceWaitingFor = "";
     private int balanceBatchCounter = 0;  // Track players checked in current batch
     private long balanceBatchPauseUntil = 0;  // Time when batch pause ends
+    private long balanceResponseTimeoutMs = 0;  // Timeout for waiting for balance response
     // Pattern to match: "PlayerName's Dollars balance: $123,456"
     private static final Pattern BALANCE_PATTERN = Pattern.compile("(\\w+)'s Dollars balance: \\$([\\d,]+)");
 
@@ -390,11 +391,32 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         balanceResults.put(playerName, balance);
                         MinecraftClient client = MinecraftClient.getInstance();
                         msg(client, "Balance Check: " + playerName + " = $" + String.format("%,d", balance));
+                        
+                        // Increment batch counter since we got a response
+                        balanceBatchCounter++;
+                        
+                        // Check if we've hit batch limit and still have more players
+                        if (balanceBatchCounter >= CONFIG.balanceBatchSize && balanceCurrentIndex < balancePlayers.size()) {
+                            // Pause between batches
+                            int batchNumber = balanceBatchCounter / CONFIG.balanceBatchSize;
+                            msg(client, String.format("Batch %d complete (%d/%d players), pausing %d seconds...", 
+                                batchNumber, balanceCurrentIndex, balancePlayers.size(), CONFIG.balanceBatchPauseMs / 1000));
+                            balanceState = BalanceState.BATCH_PAUSE;
+                            long now = System.currentTimeMillis();
+                            balanceBatchPauseUntil = now + CONFIG.balanceBatchPauseMs;
+                            balanceBatchCounter = 0;  // Reset batch counter
+                        } else {
+                            // Continue to next player
+                            balanceState = BalanceState.CHECKING_BALANCE;
+                        }
                     } catch (NumberFormatException e) {
-                        // Ignore invalid balance
+                        // Ignore invalid balance, but still transition
+                        balanceState = BalanceState.CHECKING_BALANCE;
                     }
+                } else {
+                    // Pattern didn't match, move on anyway
+                    balanceState = BalanceState.CHECKING_BALANCE;
                 }
-                balanceState = BalanceState.CHECKING_BALANCE;
             }
         }
     }
@@ -677,6 +699,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     }
                     
                     balanceState = BalanceState.WAITING_RESPONSE;
+                    balanceResponseTimeoutMs = now + 3000;  // 3 second timeout for response
                     balanceNextActionMs = now + CONFIG.balanceCheckDelayMs;
                     balanceCurrentIndex++;
                 } else {
@@ -686,22 +709,26 @@ public class ShopNavigatorClient implements ClientModInitializer {
             }
             
             case WAITING_RESPONSE -> {
-                // Timeout waiting for response or got response, check batch limits
-                balanceBatchCounter++;
-                
-                // Check if we've hit batch limit and still have more players
-                if (balanceBatchCounter >= CONFIG.balanceBatchSize && balanceCurrentIndex < balancePlayers.size()) {
-                    // Pause between batches
-                    int batchNumber = balanceBatchCounter / CONFIG.balanceBatchSize;
-                    msg(client, String.format("Batch %d complete (%d/%d players), pausing %d seconds...", 
-                        batchNumber, balanceCurrentIndex, balancePlayers.size(), CONFIG.balanceBatchPauseMs / 1000));
-                    balanceState = BalanceState.BATCH_PAUSE;
-                    balanceBatchPauseUntil = now + CONFIG.balanceBatchPauseMs;
-                    balanceBatchCounter = 0;  // Reset batch counter
-                } else {
-                    // Continue to next player
-                    balanceState = BalanceState.CHECKING_BALANCE;
+                // Wait for response or timeout
+                if (now >= balanceResponseTimeoutMs) {
+                    // Timeout - move on to check batch limits
+                    balanceBatchCounter++;
+                    
+                    // Check if we've hit batch limit and still have more players
+                    if (balanceBatchCounter >= CONFIG.balanceBatchSize && balanceCurrentIndex < balancePlayers.size()) {
+                        // Pause between batches
+                        int batchNumber = balanceBatchCounter / CONFIG.balanceBatchSize;
+                        msg(client, String.format("Batch %d complete (%d/%d players), pausing %d seconds...", 
+                            batchNumber, balanceCurrentIndex, balancePlayers.size(), CONFIG.balanceBatchPauseMs / 1000));
+                        balanceState = BalanceState.BATCH_PAUSE;
+                        balanceBatchPauseUntil = now + CONFIG.balanceBatchPauseMs;
+                        balanceBatchCounter = 0;  // Reset batch counter
+                    } else {
+                        // Continue to next player
+                        balanceState = BalanceState.CHECKING_BALANCE;
+                    }
                 }
+                // If not timeout, stay in WAITING_RESPONSE until chat handler receives balance
             }
             
             case BATCH_PAUSE -> {
