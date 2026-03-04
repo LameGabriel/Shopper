@@ -2741,7 +2741,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public boolean balanceLogToFile = true;
         public int balanceMaxPlayers = 50;
         public int balanceBatchSize = 20;  // Check this many players before pausing
-        public long balanceBatchPauseMs = 5000;  // Pause 5 seconds between batches
+        public long balanceBatchPauseMs = 10000;  // Pause 10 seconds between batches
 
         private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
         private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("shopnavigator.json");
