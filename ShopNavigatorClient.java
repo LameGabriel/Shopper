@@ -118,6 +118,14 @@ public class ShopNavigatorClient implements ClientModInitializer {
         DONE
     }
 
+    private enum BalanceState {
+        IDLE,
+        COLLECTING_PLAYERS,
+        CHECKING_BALANCE,
+        WAITING_RESPONSE,
+        DONE
+    }
+
     // ============================================================================
     // INSTANCE FIELDS - State & Configuration
     // ============================================================================
@@ -148,6 +156,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private KeyBinding craftTableKey;
     private KeyBinding forceStopKey;
     private KeyBinding gtsToggleKey;  // New: GTS auto-buyer toggle
+    private KeyBinding baltopKey;     // New: Balance checker toggle
     
     private boolean craftAwaiting = false;
     private int craftAwaitTicks = 0;
@@ -213,6 +222,15 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private int gtsTargetPrice = 0;
     private long gtsNextActionMs = 0;
     private static final Pattern GTS_LISTING_PATTERN = Pattern.compile("GTS:\\s*([\\w]+)\\s+listed\\s+(.+?)\\s+for\\s+\\$([\\d,]+)");
+
+    // Balance checker variables
+    private BalanceState balanceState = BalanceState.IDLE;
+    private java.util.List<String> balancePlayers = new java.util.ArrayList<>();
+    private int balanceCurrentIndex = 0;
+    private java.util.Map<String, Long> balanceResults = new java.util.HashMap<>();
+    private long balanceNextActionMs = 0;
+    private String balanceWaitingFor = "";
+    private static final Pattern BALANCE_PATTERN = Pattern.compile("([\\w]+).*?\\$?([\\d,]+)");
 
     private enum ConversionKind {
         BREAK_BLOCK_TO_INGOTS,
@@ -298,10 +316,16 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 GLFW.GLFW_KEY_I,
                 "category.shopnavigator"
         ));
+        baltopKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.shopnavigator.baltop",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_O,
+                "category.shopnavigator"
+        ));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
         
-        // Register chat message listener for GTS listings
+        // Register chat message listener for GTS listings and balance responses
         ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
             if (overlay) return; // Ignore overlay messages
             String text = message.getString();
@@ -314,27 +338,49 @@ public class ShopNavigatorClient implements ClientModInitializer {
     // ============================================================================
     
     private void handleChatMessage(String text) {
-        if (!CONFIG.gtsEnabled || gtsState != GTSState.IDLE) return;
-        
-        Matcher m = GTS_LISTING_PATTERN.matcher(text);
-        if (m.find()) {
-            String seller = m.group(1);
-            String item = m.group(2);
-            int price = Integer.parseInt(m.group(3).replace(",", ""));
-            
-            // Hard cap - never buy over this price regardless of config
-            if (price > CONFIG.gtsHardCap) {
-                return;
+        // Handle GTS listings
+        if (CONFIG.gtsEnabled && gtsState == GTSState.IDLE) {
+            Matcher m = GTS_LISTING_PATTERN.matcher(text);
+            if (m.find()) {
+                String seller = m.group(1);
+                String item = m.group(2);
+                int price = Integer.parseInt(m.group(3).replace(",", ""));
+                
+                // Hard cap - never buy over this price regardless of config
+                if (price > CONFIG.gtsHardCap) {
+                    return;
+                }
+                
+                // Check if price is within configured max
+                if (price <= CONFIG.gtsMaxPrice) {
+                    gtsTargetSeller = seller;
+                    gtsTargetItem = item;
+                    gtsTargetPrice = price;
+                    gtsState = GTSState.OPENING_GTS;
+                    MinecraftClient client = MinecraftClient.getInstance();
+                    msg(client, "GTS: Detected " + item + " for $" + price + " - auto-buying...");
+                }
             }
-            
-            // Check if price is within configured max
-            if (price <= CONFIG.gtsMaxPrice) {
-                gtsTargetSeller = seller;
-                gtsTargetItem = item;
-                gtsTargetPrice = price;
-                gtsState = GTSState.OPENING_GTS;
-                MinecraftClient client = MinecraftClient.getInstance();
-                msg(client, "GTS: Detected " + item + " for $" + price + " - auto-buying...");
+        }
+        
+        // Handle balance responses
+        if (CONFIG.balanceCheckEnabled && balanceState == BalanceState.WAITING_RESPONSE) {
+            // Check if this message contains balance info for the player we're waiting for
+            if (!balanceWaitingFor.isEmpty() && text.contains(balanceWaitingFor)) {
+                Matcher m = BALANCE_PATTERN.matcher(text);
+                if (m.find()) {
+                    String playerName = balanceWaitingFor;
+                    String balanceStr = m.group(2).replace(",", "");
+                    try {
+                        long balance = Long.parseLong(balanceStr);
+                        balanceResults.put(playerName, balance);
+                        MinecraftClient client = MinecraftClient.getInstance();
+                        msg(client, "Balance Check: " + playerName + " = $" + String.format("%,d", balance));
+                    } catch (NumberFormatException e) {
+                        // Ignore invalid balance
+                    }
+                }
+                balanceState = BalanceState.CHECKING_BALANCE;
             }
         }
     }
@@ -524,6 +570,162 @@ public class ShopNavigatorClient implements ClientModInitializer {
         return -1; // No price found
     }
     
+    /**
+     * Balance Checker State Machine
+     */
+    private void tickBalanceStateMachine(MinecraftClient client) {
+        long now = System.currentTimeMillis();
+        
+        // Check cooldown
+        if (now < balanceNextActionMs) return;
+        
+        switch (balanceState) {
+            case COLLECTING_PLAYERS -> {
+                // Get all online players from tab list
+                if (client.player != null && client.player.networkHandler != null) {
+                    balancePlayers.clear();
+                    var playerList = client.player.networkHandler.getPlayerList();
+                    for (var playerEntry : playerList) {
+                        String name = playerEntry.getProfile().getName();
+                        balancePlayers.add(name);
+                    }
+                    
+                    if (balancePlayers.isEmpty()) {
+                        msg(client, "Balance Check: No players found");
+                        balanceState = BalanceState.IDLE;
+                    } else {
+                        msg(client, "Balance Check: Found " + balancePlayers.size() + " players");
+                        balanceCurrentIndex = 0;
+                        balanceState = BalanceState.CHECKING_BALANCE;
+                        balanceNextActionMs = now + CONFIG.balanceCheckDelayMs;
+                    }
+                }
+            }
+            
+            case CHECKING_BALANCE -> {
+                if (balanceCurrentIndex < balancePlayers.size()) {
+                    String playerName = balancePlayers.get(balanceCurrentIndex);
+                    balanceWaitingFor = playerName;
+                    
+                    // Send /bal command
+                    if (client.player != null && client.player.networkHandler != null) {
+                        client.player.networkHandler.sendChatCommand(CONFIG.balanceCommand + " " + playerName);
+                        msg(client, "Checking: " + playerName + " (" + (balanceCurrentIndex + 1) + "/" + balancePlayers.size() + ")");
+                    }
+                    
+                    balanceState = BalanceState.WAITING_RESPONSE;
+                    balanceNextActionMs = now + CONFIG.balanceCheckDelayMs;
+                    balanceCurrentIndex++;
+                } else {
+                    // All players checked
+                    balanceState = BalanceState.DONE;
+                }
+            }
+            
+            case WAITING_RESPONSE -> {
+                // Timeout waiting for response, move to next player
+                balanceState = BalanceState.CHECKING_BALANCE;
+            }
+            
+            case DONE -> {
+                // Display results
+                displayBalanceResults(client);
+                
+                // Save to file if enabled
+                if (CONFIG.balanceLogToFile) {
+                    saveBalancesToFile(client);
+                }
+                
+                // Reset
+                balanceState = BalanceState.IDLE;
+                balancePlayers.clear();
+                balanceCurrentIndex = 0;
+                balanceWaitingFor = "";
+            }
+        }
+    }
+    
+    /**
+     * Display balance results in chat
+     */
+    private void displayBalanceResults(MinecraftClient client) {
+        if (balanceResults.isEmpty()) {
+            msg(client, "Balance Check: No balances collected");
+            return;
+        }
+        
+        msg(client, "====================================");
+        msg(client, "Balance Check Complete!");
+        msg(client, "Players Checked: " + balanceResults.size());
+        msg(client, "====================================");
+        
+        // Sort by balance (highest first) and display top 10
+        balanceResults.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .limit(10)
+                .forEach(entry -> {
+                    msg(client, String.format("%s: $%,d", entry.getKey(), entry.getValue()));
+                });
+        
+        if (balanceResults.size() > 10) {
+            msg(client, "... and " + (balanceResults.size() - 10) + " more");
+        }
+        msg(client, "====================================");
+    }
+    
+    /**
+     * Save balance results to log file
+     */
+    private void saveBalancesToFile(MinecraftClient client) {
+        try {
+            // Create logs directory if it doesn't exist
+            Path logsDir = FabricLoader.getInstance().getGameDir().resolve("logs");
+            if (!Files.exists(logsDir)) {
+                Files.createDirectories(logsDir);
+            }
+            
+            // Generate filename with timestamp
+            String timestamp = java.time.LocalDateTime.now().format(
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+            );
+            Path logFile = logsDir.resolve("balances_" + timestamp + ".txt");
+            
+            // Build content
+            StringBuilder content = new StringBuilder();
+            content.append("====================================\n");
+            content.append("Balance Check Results\n");
+            content.append("====================================\n");
+            content.append("Date: ").append(java.time.LocalDateTime.now()).append("\n");
+            content.append("Players Checked: ").append(balanceResults.size()).append("\n");
+            if (client.getCurrentServerEntry() != null) {
+                content.append("Server: ").append(client.getCurrentServerEntry().address).append("\n");
+            }
+            content.append("====================================\n\n");
+            content.append("Top Balances (Sorted):\n\n");
+            
+            // Sort and add all balances
+            int rank = 1;
+            var sortedEntries = balanceResults.entrySet().stream()
+                    .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                    .toList();
+            
+            for (var entry : sortedEntries) {
+                content.append(String.format("%d. %s: $%,d\n", rank++, entry.getKey(), entry.getValue()));
+            }
+            
+            content.append("\n====================================\n");
+            content.append("End of Report\n");
+            content.append("====================================\n");
+            
+            // Write to file
+            Files.writeString(logFile, content.toString(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            
+            msg(client, "Balance Check: Saved to " + logFile.getFileName());
+        } catch (IOException e) {
+            msg(client, "Balance Check: Failed to save log file: " + e.getMessage());
+        }
+    }
+    
     private void onEndTick(MinecraftClient client) {
         if (client.player == null || client.world == null) return;
 
@@ -694,6 +896,27 @@ public class ShopNavigatorClient implements ClientModInitializer {
         // Run GTS state machine if enabled
         if (CONFIG.gtsEnabled) {
             tickGTSStateMachine(client);
+        }
+        
+        // Balance Checker toggle
+        while (baltopKey.wasPressed()) {
+            if (balanceState == BalanceState.IDLE) {
+                // Start balance check
+                balanceState = BalanceState.COLLECTING_PLAYERS;
+                balancePlayers.clear();
+                balanceResults.clear();
+                balanceCurrentIndex = 0;
+                msg(client, "Balance Check: Starting...");
+            } else {
+                // Stop balance check
+                balanceState = BalanceState.IDLE;
+                msg(client, "Balance Check: Stopped");
+            }
+        }
+        
+        // Run Balance state machine if active
+        if (balanceState != BalanceState.IDLE) {
+            tickBalanceStateMachine(client);
         }
 
         if (craftRunning) {
@@ -2397,6 +2620,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public int gtsHardCap = 1500;
         public long gtsCooldownMs = 100;
         public String gtsCommand = "gts";
+        
+        // Balance Checker configuration
+        public boolean balanceCheckEnabled = false;
+        public long balanceCheckDelayMs = 500;
+        public String balanceCommand = "bal";
+        public boolean balanceLogToFile = true;
 
         private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
         private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("shopnavigator.json");
