@@ -233,7 +233,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private String balanceWaitingFor = "";
     private int balanceBatchCounter = 0;  // Track players checked in current batch
     private long balanceBatchPauseUntil = 0;  // Time when batch pause ends
-    private static final Pattern BALANCE_PATTERN = Pattern.compile("([\\w]+).*?\\$?([\\d,]+)");
+    // Pattern to match: "PlayerName's Dollars balance: $123,456"
+    private static final Pattern BALANCE_PATTERN = Pattern.compile("(\\w+)'s Dollars balance: \\$([\\d,]+)");
 
     private enum ConversionKind {
         BREAK_BLOCK_TO_INGOTS,
@@ -368,11 +369,21 @@ public class ShopNavigatorClient implements ClientModInitializer {
         
         // Handle balance responses
         if (CONFIG.balanceCheckEnabled && balanceState == BalanceState.WAITING_RESPONSE) {
+            // Check for permission errors (teleported/no access)
+            if (text.contains("You do not have access to that command")) {
+                MinecraftClient client = MinecraftClient.getInstance();
+                msg(client, "Balance Check: Stopped (lost permissions - may have been teleported)");
+                displayBalanceResults(client);
+                saveBalancesToFile(client);
+                balanceState = BalanceState.DONE;
+                return;
+            }
+            
             // Check if this message contains balance info for the player we're waiting for
             if (!balanceWaitingFor.isEmpty() && text.contains(balanceWaitingFor)) {
                 Matcher m = BALANCE_PATTERN.matcher(text);
                 if (m.find()) {
-                    String playerName = balanceWaitingFor;
+                    String playerName = m.group(1); // Use parsed name from pattern
                     String balanceStr = m.group(2).replace(",", "");
                     try {
                         long balance = Long.parseLong(balanceStr);
