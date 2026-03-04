@@ -380,11 +380,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 return;
             }
             
-            // Check if this message contains balance info for the player we're waiting for
-            if (!balanceWaitingFor.isEmpty() && text.contains(balanceWaitingFor)) {
-                Matcher m = BALANCE_PATTERN.matcher(text);
-                if (m.find()) {
-                    String playerName = m.group(1); // Use parsed name from pattern
+            // Try to match balance pattern in the message
+            Matcher m = BALANCE_PATTERN.matcher(text);
+            if (m.find()) {
+                // Verify this is the player we're waiting for (or close enough)
+                String playerName = m.group(1);
+                if (balanceWaitingFor.isEmpty() || playerName.equalsIgnoreCase(balanceWaitingFor)) {
                     String balanceStr = m.group(2).replace(",", "");
                     try {
                         long balance = Long.parseLong(balanceStr);
@@ -413,11 +414,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         // Ignore invalid balance, but still transition
                         balanceState = BalanceState.CHECKING_BALANCE;
                     }
-                } else {
-                    // Pattern didn't match, move on anyway
-                    balanceState = BalanceState.CHECKING_BALANCE;
                 }
+                // else: not the player we're waiting for, ignore
             }
+            // else: pattern didn't match
         }
     }
     
