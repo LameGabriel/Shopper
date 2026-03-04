@@ -123,6 +123,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         COLLECTING_PLAYERS,
         CHECKING_BALANCE,
         WAITING_RESPONSE,
+        BATCH_PAUSE,  // Pause between batches to prevent kicks
         DONE
     }
 
@@ -230,6 +231,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private java.util.Map<String, Long> balanceResults = new java.util.HashMap<>();
     private long balanceNextActionMs = 0;
     private String balanceWaitingFor = "";
+    private int balanceBatchCounter = 0;  // Track players checked in current batch
+    private long balanceBatchPauseUntil = 0;  // Time when batch pause ends
     private static final Pattern BALANCE_PATTERN = Pattern.compile("([\\w]+).*?\\$?([\\d,]+)");
 
     private enum ConversionKind {
@@ -672,8 +675,30 @@ public class ShopNavigatorClient implements ClientModInitializer {
             }
             
             case WAITING_RESPONSE -> {
-                // Timeout waiting for response, move to next player
-                balanceState = BalanceState.CHECKING_BALANCE;
+                // Timeout waiting for response or got response, check batch limits
+                balanceBatchCounter++;
+                
+                // Check if we've hit batch limit and still have more players
+                if (balanceBatchCounter >= CONFIG.balanceBatchSize && balanceCurrentIndex < balancePlayers.size()) {
+                    // Pause between batches
+                    int batchNumber = balanceBatchCounter / CONFIG.balanceBatchSize;
+                    msg(client, String.format("Batch %d complete (%d/%d players), pausing %d seconds...", 
+                        batchNumber, balanceCurrentIndex, balancePlayers.size(), CONFIG.balanceBatchPauseMs / 1000));
+                    balanceState = BalanceState.BATCH_PAUSE;
+                    balanceBatchPauseUntil = now + CONFIG.balanceBatchPauseMs;
+                    balanceBatchCounter = 0;  // Reset batch counter
+                } else {
+                    // Continue to next player
+                    balanceState = BalanceState.CHECKING_BALANCE;
+                }
+            }
+            
+            case BATCH_PAUSE -> {
+                // Wait for pause to complete
+                if (now >= balanceBatchPauseUntil) {
+                    msg(client, "Resuming balance checks...");
+                    balanceState = BalanceState.CHECKING_BALANCE;
+                }
             }
             
             case DONE -> {
@@ -955,6 +980,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 balancePlayers.clear();
                 balanceResults.clear();
                 balanceCurrentIndex = 0;
+                balanceBatchCounter = 0;  // Reset batch counter
                 msg(client, "Balance Check: Starting...");
             } else {
                 // Stop balance check
@@ -2676,6 +2702,8 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public String balanceCommand = "bal";
         public boolean balanceLogToFile = true;
         public int balanceMaxPlayers = 50;
+        public int balanceBatchSize = 20;  // Check this many players before pausing
+        public long balanceBatchPauseMs = 5000;  // Pause 5 seconds between batches
 
         private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
         private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("shopnavigator.json");
