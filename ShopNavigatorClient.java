@@ -571,6 +571,31 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
     
     /**
+     * Check if a username is valid for balance checking
+     * Filters out NPCs, bots, and special characters that cause command errors
+     */
+    private boolean isValidUsername(String username) {
+        if (username == null || username.isEmpty()) {
+            return false;
+        }
+        
+        // Skip usernames starting with special characters (NPCs, bots, etc.)
+        if (username.startsWith("!")) {
+            return false;
+        }
+        if (username.startsWith("~")) {
+            return false;
+        }
+        if (username.startsWith("#")) {
+            return false;
+        }
+        
+        // Only allow valid Minecraft usernames: a-z, A-Z, 0-9, and underscore
+        // Length: 1-16 characters
+        return username.matches("[a-zA-Z0-9_]{1,16}");
+    }
+    
+    /**
      * Balance Checker State Machine
      */
     private void tickBalanceStateMachine(MinecraftClient client) {
@@ -585,16 +610,40 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (client.player != null && client.player.networkHandler != null) {
                     balancePlayers.clear();
                     var playerList = client.player.networkHandler.getPlayerList();
+                    int totalFound = playerList.size();
+                    int filteredOut = 0;
+                    
                     for (var playerEntry : playerList) {
                         String name = playerEntry.getProfile().getName();
+                        
+                        // Filter out invalid usernames (NPCs, bots, special chars)
+                        if (!isValidUsername(name)) {
+                            filteredOut++;
+                            continue;
+                        }
+                        
                         balancePlayers.add(name);
                     }
                     
+                    // Limit to max players to prevent kicks
+                    boolean limited = false;
+                    if (balancePlayers.size() > CONFIG.balanceMaxPlayers) {
+                        balancePlayers.subList(CONFIG.balanceMaxPlayers, balancePlayers.size()).clear();
+                        limited = true;
+                    }
+                    
                     if (balancePlayers.isEmpty()) {
-                        msg(client, "Balance Check: No players found");
+                        msg(client, "Balance Check: No valid players found");
                         balanceState = BalanceState.IDLE;
                     } else {
-                        msg(client, "Balance Check: Found " + balancePlayers.size() + " players (Note: Minecraft tab list limited to ~100)");
+                        String filterMsg = filteredOut > 0 ? 
+                            " (filtered to " + balancePlayers.size() + " valid, skipped " + filteredOut + " NPCs/invalid)" : "";
+                        msg(client, "Balance Check: Found " + totalFound + " players" + filterMsg);
+                        
+                        if (limited) {
+                            msg(client, "Balance Check: Limited to " + CONFIG.balanceMaxPlayers + " players max (change balanceMaxPlayers in config)");
+                        }
+                        
                         balanceCurrentIndex = 0;
                         balanceState = BalanceState.CHECKING_BALANCE;
                         balanceNextActionMs = now + CONFIG.balanceCheckDelayMs;
@@ -2623,9 +2672,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
         
         // Balance Checker configuration
         public boolean balanceCheckEnabled = false;
-        public long balanceCheckDelayMs = 1500;
+        public long balanceCheckDelayMs = 2500;
         public String balanceCommand = "bal";
         public boolean balanceLogToFile = true;
+        public int balanceMaxPlayers = 50;
 
         private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
         private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("shopnavigator.json");
