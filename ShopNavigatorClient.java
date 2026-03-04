@@ -594,7 +594,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         msg(client, "Balance Check: No players found");
                         balanceState = BalanceState.IDLE;
                     } else {
-                        msg(client, "Balance Check: Found " + balancePlayers.size() + " players");
+                        msg(client, "Balance Check: Found " + balancePlayers.size() + " players (Note: Minecraft tab list limited to ~100)");
                         balanceCurrentIndex = 0;
                         balanceState = BalanceState.CHECKING_BALANCE;
                         balanceNextActionMs = now + CONFIG.balanceCheckDelayMs;
@@ -2623,7 +2623,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         
         // Balance Checker configuration
         public boolean balanceCheckEnabled = false;
-        public long balanceCheckDelayMs = 500;
+        public long balanceCheckDelayMs = 1500;
         public String balanceCommand = "bal";
         public boolean balanceLogToFile = true;
 
