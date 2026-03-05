@@ -879,6 +879,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 // Reset
                 balanceState = BalanceState.IDLE;
                 balancePlayers.clear();
+                balanceResults.clear();  // Clear balance data for next check
                 balanceCurrentIndex = 0;
                 balanceWaitingFor = "";
             }
