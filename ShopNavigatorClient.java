@@ -2863,7 +2863,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public String balanceCommand = "bal";
         public boolean balanceLogToFile = true;
         public boolean balanceUseCustomList = true;  // Use hardcoded player list instead of tab list
-        public int balanceMaxPlayers = 50;
+        public int balanceMaxPlayers = 533;  // Total hardcoded players
         public int balanceBatchSize = 20;  // Check this many players before pausing
         public long balanceBatchPauseMs = 10000;  // Pause 10 seconds between batches
 
