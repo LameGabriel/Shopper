@@ -2901,6 +2901,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (!cfg.useTwoStagePlan) {
                     // single-stage case: keep existing shopCommand/target/plan
                 }
+                // Migrate old balanceMaxPlayers value (50 -> 533)
+                if (cfg.balanceMaxPlayers == 50) {
+                    cfg.balanceMaxPlayers = 533;  // Update to check all hardcoded players
+                }
                 Files.createDirectories(PATH.getParent());
                 Files.writeString(PATH, GSON.toJson(cfg));
                 return cfg;
