@@ -632,6 +632,104 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
     
     /**
+     * Returns hardcoded list of specific players to check balances for.
+     * This is a temporary fix to bypass Minecraft's tab list limitation.
+     */
+    private java.util.List<String> getCustomPlayerList() {
+        return java.util.Arrays.asList(
+            "0______o_______0", "100krn", "1Exa", "1matin1lapin", "420VexD", "4zZy_", "7RIPLE",
+            "AK47XHY", "AKANE08", "ASingularCheerio", "ASriex1", "Abyssl_", "AccioDarkMark",
+            "Aerobro101", "AibertAinstein", "AidenFam21", "Aidenplayz5546", "Alexander539",
+            "AlphaJoker20", "Antaarioss", "AnubisAkaya", "ApricornDept", "ArkTorch", "ArsonCalypso",
+            "Arturo_GM", "Ash_Ketchup_oO", "Axewrose", "Azro26", "BLOODYMASTER63", "BPANTHERSON",
+            "BRobbo_", "BULKFUNN230", "Bankhead090", "Barneyzz", "BeastlyW", "Becons", "BenRain1011",
+            "Bennosukke", "BergmanDoe", "BergmanJoe", "BestJester14554", "BigSteppinOnEm", "BigTullz",
+            "Big_Dave65", "Birdboxx", "Birdboxxx", "Birdboxxxx", "Birdbx", "BishopJack", "Bkbox",
+            "Bkumoe", "Blakmajickkat", "Blank78_oof", "BlckZver", "BlueCubeGaming", "BlueGen2_Playzzz",
+            "BoaMarrow", "BoiledNoodle08", "BraveAxe26", "Brigghs", "Bunnery", "BurgersOnFleek",
+            "Caeltroxs", "CandyVi", "CapitaineZarbi", "Captain_Avera", "ChadThunderdock", "Chamathkara",
+            "Chechogx", "Chilli_Ramen", "Cincoco", "Cindirge", "Claytonctc", "CoconutWaffl3",
+            "CoucouSavaToi", "CrimsonConcholer", "CristVale", "CryoZKai", "CrypticEpodic",
+            "CrypticRedeemer", "Cyoro_", "D00magedd0n", "D4mD4m8787", "DaBroBenji", "DaDAWG64",
+            "DaGoddessz", "DaggerOfDreams", "Daphne", "Darkgamer5474", "Darkness3agle", "Darkong",
+            "DarkraisKing", "Daweed_42O", "Dawg20", "DeanStryder", "Delta_Drake", "DenchShipcrusher",
+            "Dinky_Evergreen", "DisneyWorld", "DocCoffee", "Dragon_Beast54", "Dragonblade9469",
+            "DrunkenMead8199", "Dshunk", "EdmonStevemon", "Elite_comando43", "Elay_Asher",
+            "Elwbnrandom", "Empathy_15", "Enderslayer7890", "Engineliam", "Erybel", "Ethan2691",
+            "EvanYuh", "EvenMountain0", "Fakemonman", "Falkirk", "Fehgatoni", "FeliipeF",
+            "FernNFungi", "FierceEnjoyer", "FireNationKing", "Fltmech", "FuneralPrincess",
+            "FunkyNucklez", "FutureBlock1620", "G1ganut", "GFGF508", "GLAMROCKFREDDI", "GQPlayer11",
+            "GamerOn3", "GayHighlighter", "GbzEnjoyers", "GenSpeedy", "Genesis_0", "GhostOut",
+            "GingerGiant2007", "GiverOrTaker", "Glyoh", "GoldeNightmar", "Goflow11", "Gr8King21",
+            "Green3yedGoblin", "Griimzey", "Grimvfx", "Grimzon", "Gryphh", "GuyThatHatesMC",
+            "Gxrciac", "H4rv3y_Tim3", "HOKUiN", "HabitualOak5", "HeatingCarton52", "Hellscream",
+            "HelpMeAmAddicted", "Hikari_ftw", "Hornetxc", "Huffleduff", "IAMKnickknack", "ILPHz",
+            "ImAltF4ing", "ImBardOut", "ImXie", "Im_NooBly", "IamZigge", "Ibylith_", "Ieugim",
+            "Imaout", "Interstella317", "Ironfootball", "Its_gilad", "ItsJustMeKarmaV2",
+            "Itsy_Bitsy_4sh", "JAC123321", "JARNACLE", "JDJACKPOT777", "JacobJacob5", "JamesThatcher",
+            "Jaz_21", "Jedionce", "JoCro_57", "JollyMutt", "JoseThc", "JrsZib", "Juic3b0x1111",
+            "JuniorMafiaO1", "JustChainsawz", "KAL2303", "KBD4207", "KinkUnc", "KiingClumsy",
+            "KirEXE", "Kirigiri_goat", "Kitterkiller132", "Kloe12356", "Kmoney001", "Knifeyboii",
+            "Kuuleii", "Kaelis64", "King_Noob_Bob_", "Lamprocapnos1", "Laetsuki", "Lamarglazer7720",
+            "LegendGamer2013", "LemLiam", "Lenyardo", "LilBootyVert", "LilWoozyVert", "Liam21212",
+            "Lil_Kaboom_Man", "LordsRose", "LostReader", "LU5HJ4S0N", "Lunaa43", "Man_Myth_Legend",
+            "Marce_B0T", "MarkyMarkC789", "Marytone", "MasSny016", "MatthewDiamorn", "Matt_32Ocean",
+            "Mean_Wash777", "MeEmilie", "MeoMayo", "Metrocool", "MicahBlue5", "Moist_FTR47",
+            "MoldyTaint", "Mondo_M0ron", "Mongorawrs", "MrPiggas", "MrSeeSando", "Mr_please",
+            "MsKohai", "Mulg02", "Munodot", "MunkOnNyquil", "MxUkiyo", "MysticNightSky", "Nexkka",
+            "NickyCorns", "NightSkies00", "NinjaSean2014", "Nomad_Danimal", "NovaAce", "Nutter_Butter58",
+            "Nvbzyy", "NyceGoblin10", "Nyxikyu", "OTAQUFATHER", "OTAdam11", "Omena082", "Omni_Poyo24",
+            "PAGANIUTO", "PaulFunyuns", "PapaSteve99", "Papczun", "Pewpewpew71", "PizzaMike",
+            "Poggograph", "PokeHog", "Polkapocalyptic", "Pottodesu", "Pureangel04", "Pxrplezzz",
+            "QuiteTired", "RGDK00471", "RLAC220209", "RaccTrench", "RaidenXXZone", "RaldMeky",
+            "RandomGuy58", "RenegadeHunter1", "ResolvedBasil54", "Reythonus", "RichardTheAlien",
+            "Riku8081", "RyanSandyz", "Ryker7812", "S1R_Kuuran", "SIXD9HER", "SKYYYY002", "SRVP",
+            "SBK_FROST", "SacredAfton", "SadVexation", "SaberAstro", "Salchin", "Sc00biez00bie",
+            "Schlossaa", "Scorch0019", "Semirias", "Senow", "Serged", "Shad0w_Mystic", "Shroll",
+            "Shrimpoe", "Silentzium", "SirKentC", "SixBangs", "SkitzOnNyQuil", "Skinny4321",
+            "Skualk", "Skys_Metro", "Slayerzx10", "SmearyPage54299", "Snugglydobbie2", "Sober_Lord",
+            "Soggymen", "Solari_the_Avali", "Solus68", "Sourisheart", "Soviet_Josh", "SparedJarl388",
+            "Stoocky", "Stone4983", "StormwingGTS", "StuffierBanjo11", "SunlitHaze", "SuperChar21",
+            "Sushiroll809", "Suttony", "Swaybar_", "Sweetin", "Syth40", "TAB1221gaming", "TURTLEKING1025",
+            "TalahKai", "Tank6201", "TastyAsians", "TeaCupForMe", "Tekp", "Th3yl0ve_MJ", "TheAGR0",
+            "TheLamestOne", "TheOrderOguz", "TheRealestRyu", "Therealkyzer", "Thirteen__",
+            "TiltL0rdd", "Timeless5ilver", "ToeT1ckler", "Tokumeino", "Toniii1", "TonyTheTiger538",
+            "Torhugo35", "ToxicShaDy", "Trent_Bliss_324", "Trickster1330", "TulaMarron3000",
+            "Typhon0425", "UberTMHK", "Uhaf56", "V4mpzz_", "VanillaTheBunny", "VinierPaul",
+            "ViviFrog", "Volt1ng", "W15HE5", "W31NI3S", "WildBeast737", "Willahbean", "William7_7",
+            "WoLfWReCkEr408", "Wolfized", "WooTea", "Wraither_Bring", "Wubungus", "Wero91310",
+            "Whynot_liam", "XTB", "XerXens", "XxguixX", "YapGPT", "YAUCHEN", "YUTAOPPA", "Youngiant",
+            "ZackJ420", "ZegoFruit", "Zerold7400", "ZestyMan", "Zief__", "_Ar3Q_", "_H3L3NN_",
+            "_J8KER_", "_Serrose", "_The_Lyros_", "_ZeroXA", "_xKokushibox_", "___o___o__",
+            "ace_sparkle_", "aceessentials", "agua_bottle", "ajphones", "antimagicsword",
+            "aPlainpancake", "appajoose", "aust15sector", "awesomepowers1", "axoLeef",
+            "agentduck123998", "babydady", "babywendawgz", "beanbeanbean_", "bobsky_0525",
+            "bst3w15", "bvc1", "carbonitrogen", "chiefoflaughter", "cmoney_7", "dhez",
+            "djisthebest223", "doritoplays", "electricwatt_", "env3xty", "ert1theturt1e",
+            "fefetorresgemeas", "foo_drone0", "franpato", "fxwny", "gg_gunner107", "ghost04997",
+            "gianlucabr14", "griffdagoat67", "half_return", "henhunfer", "honoru", "howf",
+            "humphreywolfy", "huskey420", "iiiZOEiii", "ilovefxxguild", "imRadwolf", "inLoveBunnee",
+            "iTzCr4zyPT", "itzJetJay", "ixPeanutxi", "iyluna", "jabooto", "jonnymhm", "just_aPig",
+            "kaipoidash2", "koldboyz", "krofile", "lgmobby", "laqified", "mannyma586", "maxik5",
+            "medkitlol", "meowdii_", "mih8ko", "milkdrinker84", "misotna", "monkeydey", "mseryx",
+            "mulchies", "natalia_t", "notbeezy", "oJerri", "oMareep", "opiebull2022", "og6yo",
+            "omriko301", "oncoffe123457", "onyspectrum", "oystergirl123", "CROSSFADDED69",
+            "papasmurf1515", "paslasher", "pesoDashoota", "pixelglitches49", "pokemon6979",
+            "psychiumz", "quinnininn", "rzxrr", "riceman513", "ricesoo", "rorert", "rustycreeper",
+            "samtheman1947", "scyf", "sinamile", "skillskills2001", "squaxer", "ssshayos",
+            "starofjustice", "susu_pheonix1123", "thelittleststar", "thewelshmando",
+            "theoneofakind224", "the_mad_jad", "thetornado494", "tokyo3315", "toasty_topaz",
+            "triqk", "troopler", "tylerrb21", "Earlystorm32670", "umdreon1st", "unicorm",
+            "unknownlix", "venturebug", "vichops", "vpve", "w0lfhunter7", "w1cked___tpp",
+            "woodabest", "wuantepz_", "xXCruelLoverXx", "xX_RB_Xx", "xochl", "ykAstrxl",
+            "yoinkydoinky", "yozhik7, "zepphyy_", "zkswen", "SnowyOwl10", "deathkilla25",
+            "Bigwhiteman21", "AdlixNZ", "Deve1oped", "nove11a", "mewzii_", "stoneypoint",
+            "Simpieoso", "DaSleepyDuck", "KeoMC_", "beanboy222", "Tonymontanag762",
+            "YourMajjesty", "TheRealOrijang", "Niosuill", "KAL2303"
+        );
+    }
+    
+    /**
      * Balance Checker State Machine
      */
     private void tickBalanceStateMachine(MinecraftClient client) {
@@ -642,23 +740,48 @@ public class ShopNavigatorClient implements ClientModInitializer {
         
         switch (balanceState) {
             case COLLECTING_PLAYERS -> {
-                // Get all online players from tab list
+                // Get players from custom list or tab list
                 if (client.player != null && client.player.networkHandler != null) {
                     balancePlayers.clear();
-                    var playerList = client.player.networkHandler.getPlayerList();
-                    int totalFound = playerList.size();
+                    int totalFound = 0;
                     int filteredOut = 0;
                     
-                    for (var playerEntry : playerList) {
-                        String name = playerEntry.getProfile().getName();
+                    if (CONFIG.balanceUseCustomList) {
+                        // Use hardcoded custom player list
+                        var customList = getCustomPlayerList();
+                        totalFound = customList.size();
                         
-                        // Filter out invalid usernames (NPCs, bots, special chars)
-                        if (!isValidUsername(name)) {
-                            filteredOut++;
-                            continue;
+                        for (String name : customList) {
+                            // Filter out invalid usernames (NPCs, bots, special chars)
+                            if (!isValidUsername(name)) {
+                                filteredOut++;
+                                continue;
+                            }
+                            
+                            balancePlayers.add(name);
                         }
                         
-                        balancePlayers.add(name);
+                        msg(client, "Balance Check: Using custom player list (" + totalFound + " players)");
+                    } else {
+                        // Use tab list (original behavior)
+                        var playerList = client.player.networkHandler.getPlayerList();
+                        totalFound = playerList.size();
+                        
+                        for (var playerEntry : playerList) {
+                            String name = playerEntry.getProfile().getName();
+                            
+                            // Filter out invalid usernames (NPCs, bots, special chars)
+                            if (!isValidUsername(name)) {
+                                filteredOut++;
+                                continue;
+                            }
+                            
+                            balancePlayers.add(name);
+                        }
+                        
+                        String filterMsg = filteredOut > 0 ? 
+                            " (filtered to " + balancePlayers.size() + " valid, skipped " + filteredOut + " NPCs/invalid)" : "";
+                        msg(client, "Balance Check: Found " + totalFound + " players from tab list" + filterMsg);
                     }
                     
                     // Limit to max players to prevent kicks
@@ -672,9 +795,9 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         msg(client, "Balance Check: No valid players found");
                         balanceState = BalanceState.IDLE;
                     } else {
-                        String filterMsg = filteredOut > 0 ? 
-                            " (filtered to " + balancePlayers.size() + " valid, skipped " + filteredOut + " NPCs/invalid)" : "";
-                        msg(client, "Balance Check: Found " + totalFound + " players" + filterMsg);
+                        if (filteredOut > 0 && CONFIG.balanceUseCustomList) {
+                            msg(client, "Balance Check: Filtered to " + balancePlayers.size() + " valid (skipped " + filteredOut + " invalid)");
+                        }
                         
                         if (limited) {
                             msg(client, "Balance Check: Limited to " + CONFIG.balanceMaxPlayers + " players max (change balanceMaxPlayers in config)");
@@ -2739,6 +2862,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public long balanceCheckDelayMs = 2500;
         public String balanceCommand = "bal";
         public boolean balanceLogToFile = true;
+        public boolean balanceUseCustomList = true;  // Use hardcoded player list instead of tab list
         public int balanceMaxPlayers = 50;
         public int balanceBatchSize = 20;  // Check this many players before pausing
         public long balanceBatchPauseMs = 10000;  // Pause 10 seconds between batches
