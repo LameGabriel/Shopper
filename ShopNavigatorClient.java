@@ -382,15 +382,20 @@ public class ShopNavigatorClient implements ClientModInitializer {
             
             // Try to match balance pattern in the message
             Matcher m = BALANCE_PATTERN.matcher(text);
+            MinecraftClient client = MinecraftClient.getInstance();
+            msg(client, "DEBUG: Attempting pattern match on: " + text);
             if (m.find()) {
                 // Verify this is the player we're waiting for (or close enough)
                 String playerName = m.group(1);
+                msg(client, "DEBUG: Pattern matched! Player: " + playerName);
                 if (balanceWaitingFor.isEmpty() || playerName.equalsIgnoreCase(balanceWaitingFor)) {
+                    msg(client, "DEBUG: Player matches waiting for: " + balanceWaitingFor);
                     String balanceStr = m.group(2).replace(",", "");
                     try {
                         long balance = Long.parseLong(balanceStr);
+                        msg(client, "DEBUG: Storing balance - " + playerName + " = $" + balance);
                         balanceResults.put(playerName, balance);
-                        MinecraftClient client = MinecraftClient.getInstance();
+                        msg(client, "DEBUG: HashMap size now: " + balanceResults.size());
                         msg(client, "Balance Check: " + playerName + " = $" + String.format("%,d", balance));
                         
                         // Increment batch counter since we got a response
