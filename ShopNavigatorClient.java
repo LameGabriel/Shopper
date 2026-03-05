@@ -722,7 +722,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
             "triqk", "troopler", "tylerrb21", "Earlystorm32670", "umdreon1st", "unicorm",
             "unknownlix", "venturebug", "vichops", "vpve", "w0lfhunter7", "w1cked___tpp",
             "woodabest", "wuantepz_", "xXCruelLoverXx", "xX_RB_Xx", "xochl", "ykAstrxl",
-            "yoinkydoinky", "yozhik7, "zepphyy_", "zkswen", "SnowyOwl10", "deathkilla25",
+            "yoinkydoinky", "yozhik7", "zepphyy_", "zkswen", "SnowyOwl10", "deathkilla25",
             "Bigwhiteman21", "AdlixNZ", "Deve1oped", "nove11a", "mewzii_", "stoneypoint",
             "Simpieoso", "DaSleepyDuck", "KeoMC_", "beanboy222", "Tonymontanag762",
             "YourMajjesty", "TheRealOrijang", "Niosuill", "KAL2303"
