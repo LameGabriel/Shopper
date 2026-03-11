@@ -827,6 +827,21 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private void sendSellAllCommand(MinecraftClient client) {
         var nh = client.getNetworkHandler();
         if (nh == null) return;
+        
+        // Check for iron items before selling
+        recalcInventory(client);
+        if (ironBlocks > 0 || ingots > 0 || nuggets > 0) {
+            msg(client, "Skipping /sell all - found iron items (blocks=" + ironBlocks + ", ingots=" + ingots + ", nuggets=" + nuggets + ")");
+            msg(client, "Running /craft to finish crafting metronomes...");
+            try {
+                nh.sendCommand("craft");
+                msg(client, "Sent /craft command");
+            } catch (Exception e) {
+                msg(client, "Failed to send /craft (" + e.getClass().getSimpleName() + ": " + e.getMessage() + ")");
+            }
+            return;
+        }
+        
         try {
             nh.sendCommand("sell all");
             msg(client, "Sent /sell all");
