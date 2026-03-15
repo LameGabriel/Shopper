@@ -5,6 +5,7 @@ import com.google.gson.GsonBuilder;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
@@ -62,6 +63,13 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private static final int NUGGET_SLOT = 5;
     private static final int NOTE_SLOT = 8;
     private static final int MIN_ACTION_COOLDOWN_TICKS = 1; // maximum speed for crafting operations
+    
+    // Server desync prevention: slow down processing starting at this batch index
+    private static final int DESYNC_PREVENTION_BATCH_THRESHOLD = 14;
+    private static final int BATCH_DELAY_MULTIPLIER = 3; // multiply delays by this factor for batches >= threshold
+    private static final int FAST_FILL_SLOTS_PER_TICK = 5; // number of slots to fill per tick for batches < threshold
+    private static final int SLOW_FILL_SLOTS_PER_TICK = 1; // number of slots to fill per tick for batches >= threshold
+    
     // Precomputed optimal block/nugget conversions per batch (64 items per batch).
     // Format: {crafts, blocksToBreak, ingotsToNuggets}
     // For 64 crafts: 320 ingots + 64 nuggets needed. 64 nuggets = 8 ingots, so 328 ingots total = 37 blocks
@@ -99,6 +107,25 @@ public class ShopNavigatorClient implements ClientModInitializer {
         DONE,
         FAILED
     }
+    
+    private enum GTSState {
+        IDLE,
+        OPENING_GTS,
+        WAITING_FOR_GUI,
+        FINDING_ITEM,
+        VERIFYING_PRICE,  // Verify price from GUI before confirming
+        CONFIRMING_BUY,
+        DONE
+    }
+
+    private enum BalanceState {
+        IDLE,
+        COLLECTING_PLAYERS,
+        CHECKING_BALANCE,
+        WAITING_RESPONSE,
+        BATCH_PAUSE,  // Pause between batches to prevent kicks
+        DONE
+    }
 
     // ============================================================================
     // INSTANCE FIELDS - State & Configuration
@@ -106,6 +133,11 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
     // Shopping state machine
     private State state = State.IDLE;
+    private State lastState = State.IDLE;
+    private long lastStateChangeMs = 0;
+    private int stateTimeoutRetries = 0;
+    private static final long STATE_TIMEOUT_MS = 7000; // 7 seconds (reduced from 10 for faster stuck detection)
+    private static final int MAX_STATE_TIMEOUT_RETRIES = 3;
 
     private int lastPageNumber = -1;
     private long nextActionAtMs = 0;
@@ -124,6 +156,9 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private KeyBinding craftAutoKey;
     private KeyBinding craftTableKey;
     private KeyBinding forceStopKey;
+    private KeyBinding gtsToggleKey;  // New: GTS auto-buyer toggle
+    private KeyBinding baltopKey;     // New: Balance checker toggle
+    
     private boolean craftAwaiting = false;
     private int craftAwaitTicks = 0;
     private boolean craftRunning = false;
@@ -180,6 +215,27 @@ public class ShopNavigatorClient implements ClientModInitializer {
     private static final int BLOCKS_TO_INGOTS_UNITS_PER_OP = 64; // increased from 14 to support larger batch sizes
     private static final int INGOTS_TO_NUGGETS_UNITS_PER_OP = 64; // increased from 14 to support larger batch sizes
     private long craftFinishAtMs = 0; // tracks when post-craft delay expires
+    
+    // GTS Auto-Buyer state
+    private GTSState gtsState = GTSState.IDLE;
+    private String gtsTargetSeller = "";
+    private String gtsTargetItem = "";
+    private int gtsTargetPrice = 0;
+    private long gtsNextActionMs = 0;
+    private static final Pattern GTS_LISTING_PATTERN = Pattern.compile("GTS:\\s*([\\w]+)\\s+listed\\s+(.+?)\\s+for\\s+\\$([\\d,]+)");
+
+    // Balance checker variables
+    private BalanceState balanceState = BalanceState.IDLE;
+    private java.util.List<String> balancePlayers = new java.util.ArrayList<>();
+    private int balanceCurrentIndex = 0;
+    private java.util.Map<String, Long> balanceResults = new java.util.HashMap<>();
+    private long balanceNextActionMs = 0;
+    private String balanceWaitingFor = "";
+    private int balanceBatchCounter = 0;  // Track players checked in current batch
+    private long balanceBatchPauseUntil = 0;  // Time when batch pause ends
+    private long balanceResponseTimeoutMs = 0;  // Timeout for waiting for balance response
+    // Pattern to match: "PlayerName's Dollars balance: $123,456"
+    private static final Pattern BALANCE_PATTERN = Pattern.compile("(\\w+)'s Dollars balance: \\$([\\d,]+)");
 
     private enum ConversionKind {
         BREAK_BLOCK_TO_INGOTS,
@@ -259,10 +315,658 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 GLFW.GLFW_KEY_K,
                 "category.shopnavigator"
         ));
+        gtsToggleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.shopnavigator.gtstoggle",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_I,
+                "category.shopnavigator"
+        ));
+        baltopKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.shopnavigator.baltop",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_O,
+                "category.shopnavigator"
+        ));
 
         ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
+        
+        // Register chat message listener for GTS listings and balance responses
+        ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
+            if (overlay) return; // Ignore overlay messages
+            String text = message.getString();
+            handleChatMessage(text);
+        });
     }
+    
+    // ============================================================================
+    // GTS AUTO-BUYER METHODS
+    // ============================================================================
+    
+    private void handleChatMessage(String text) {
+        // Handle GTS listings
+        if (CONFIG.gtsEnabled && gtsState == GTSState.IDLE) {
+            Matcher m = GTS_LISTING_PATTERN.matcher(text);
+            if (m.find()) {
+                String seller = m.group(1);
+                String item = m.group(2);
+                int price = Integer.parseInt(m.group(3).replace(",", ""));
+                
+                // Hard cap - never buy over this price regardless of config
+                if (price > CONFIG.gtsHardCap) {
+                    return;
+                }
+                
+                // Check if price is within configured max
+                if (price <= CONFIG.gtsMaxPrice) {
+                    gtsTargetSeller = seller;
+                    gtsTargetItem = item;
+                    gtsTargetPrice = price;
+                    gtsState = GTSState.OPENING_GTS;
+                    MinecraftClient client = MinecraftClient.getInstance();
+                    msg(client, "GTS: Detected " + item + " for $" + price + " - auto-buying...");
+                }
+            }
+        }
+        
+        // Handle balance responses
+        if (CONFIG.balanceCheckEnabled && balanceState == BalanceState.WAITING_RESPONSE) {
+            // Check for permission errors (teleported/no access)
+            if (text.contains("You do not have access to that command")) {
+                MinecraftClient client = MinecraftClient.getInstance();
+                msg(client, "Balance Check: Stopped (lost permissions - may have been teleported)");
+                displayBalanceResults(client);
+                saveBalancesToFile(client);
+                balanceState = BalanceState.DONE;
+                return;
+            }
+            
+            // Try to match balance pattern in the message
+            Matcher m = BALANCE_PATTERN.matcher(text);
+            MinecraftClient client = MinecraftClient.getInstance();
+            msg(client, "DEBUG: Attempting pattern match on: " + text);
+            if (m.find()) {
+                // Verify this is the player we're waiting for (or close enough)
+                String playerName = m.group(1);
+                msg(client, "DEBUG: Pattern matched! Player: " + playerName);
+                if (balanceWaitingFor.isEmpty() || playerName.equalsIgnoreCase(balanceWaitingFor)) {
+                    msg(client, "DEBUG: Player matches waiting for: " + balanceWaitingFor);
+                    String balanceStr = m.group(2).replace(",", "");
+                    try {
+                        long balance = Long.parseLong(balanceStr);
+                        msg(client, "DEBUG: Storing balance - " + playerName + " = $" + balance);
+                        balanceResults.put(playerName, balance);
+                        msg(client, "DEBUG: HashMap size now: " + balanceResults.size());
+                        msg(client, "Balance Check: " + playerName + " = $" + String.format("%,d", balance));
+                        
+                        // Increment batch counter since we got a response
+                        balanceBatchCounter++;
+                        
+                        // Check if we've hit batch limit and still have more players
+                        if (balanceBatchCounter >= CONFIG.balanceBatchSize && balanceCurrentIndex < balancePlayers.size()) {
+                            // Pause between batches
+                            int batchNumber = balanceBatchCounter / CONFIG.balanceBatchSize;
+                            msg(client, String.format("Batch %d complete (%d/%d players), pausing %d seconds...", 
+                                batchNumber, balanceCurrentIndex, balancePlayers.size(), CONFIG.balanceBatchPauseMs / 1000));
+                            balanceState = BalanceState.BATCH_PAUSE;
+                            long now = System.currentTimeMillis();
+                            balanceBatchPauseUntil = now + CONFIG.balanceBatchPauseMs;
+                            balanceBatchCounter = 0;  // Reset batch counter
+                        } else {
+                            // Continue to next player
+                            balanceState = BalanceState.CHECKING_BALANCE;
+                        }
+                    } catch (NumberFormatException e) {
+                        // Ignore invalid balance, but still transition
+                        balanceState = BalanceState.CHECKING_BALANCE;
+                    }
+                }
+                // else: not the player we're waiting for, ignore
+            }
+            // else: pattern didn't match
+        }
+    }
+    
+    private void tickGTSStateMachine(MinecraftClient client) {
+        // Check cooldown
+        if (System.currentTimeMillis() < gtsNextActionMs) return;
+        
+        switch (gtsState) {
+            case IDLE:
+                // Nothing to do
+                break;
+                
+            case OPENING_GTS:
+                if (client.player != null && client.player.networkHandler != null) {
+                    client.player.networkHandler.sendChatCommand(CONFIG.gtsCommand);
+                    msg(client, "Sent /" + CONFIG.gtsCommand + " to open GTS");
+                }
+                gtsState = GTSState.WAITING_FOR_GUI;
+                gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                break;
+                
+            case WAITING_FOR_GUI:
+                if (client.currentScreen instanceof HandledScreen<?> screen) {
+                    ScreenHandler handler = screen.getScreenHandler();
+                    if (handler instanceof GenericContainerScreenHandler) {
+                        gtsState = GTSState.FINDING_ITEM;
+                        gtsNextActionMs = System.currentTimeMillis() + 200;
+                    }
+                }
+                break;
+                
+            case FINDING_ITEM:
+                if (System.currentTimeMillis() >= gtsNextActionMs) {
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        ScreenHandler handler = screen.getScreenHandler();
+                        if (handler instanceof GenericContainerScreenHandler containerHandler) {
+                            // Click slot 9 (first purchasable item in second row)
+                            // First row (slots 0-8) contains settings/navigation
+                            clickSlot(client, containerHandler, 9);
+                            msg(client, "GTS: Clicking slot 9 to select item");
+                            gtsState = GTSState.VERIFYING_PRICE;  // Changed to verify price before buying
+                            gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                        }
+                    } else {
+                        // GUI closed unexpectedly
+                        gtsState = GTSState.DONE;
+                    }
+                }
+                break;
 
+            case VERIFYING_PRICE:
+                if (System.currentTimeMillis() >= gtsNextActionMs) {
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        ScreenHandler handler = screen.getScreenHandler();
+                        if (handler instanceof GenericContainerScreenHandler containerHandler) {
+                            // Verify the actual price from the GUI before confirming
+                            int actualPrice = verifyGTSPrice(client, containerHandler);
+                            
+                            if (actualPrice <= 0) {
+                                // Could not read price - cancel for safety
+                                msg(client, "GTS: CANCELLED - Could not verify price in GUI (safety measure)");
+                                forceCloseScreen(client);
+                                gtsState = GTSState.IDLE;
+                            } else if (actualPrice > CONFIG.gtsHardCap) {
+                                // Price exceeds hard cap - cancel to prevent scam
+                                msg(client, String.format("GTS: CANCELLED - Price $%,d exceeds hard cap of $%,d", actualPrice, CONFIG.gtsHardCap));
+                                forceCloseScreen(client);
+                                gtsState = GTSState.IDLE;
+                            } else {
+                                // Price verified and within limit - safe to proceed
+                                msg(client, String.format("GTS: Price verified at $%,d (within $%,d limit)", actualPrice, CONFIG.gtsHardCap));
+                                gtsState = GTSState.CONFIRMING_BUY;
+                                gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                            }
+                        }
+                    } else {
+                        // GUI closed unexpectedly
+                        gtsState = GTSState.DONE;
+                    }
+                }
+                break;
+
+            case CONFIRMING_BUY:
+                if (System.currentTimeMillis() >= gtsNextActionMs) {
+                    if (client.currentScreen instanceof HandledScreen<?> screen) {
+                        ScreenHandler handler = screen.getScreenHandler();
+                        if (handler instanceof GenericContainerScreenHandler containerHandler) {
+                            // Click slot 11 to confirm the purchase
+                            clickSlot(client, containerHandler, 11);
+                            msg(client, "GTS: Clicking slot 11 to confirm purchase of " + gtsTargetItem + " for $" + gtsTargetPrice);
+                            gtsState = GTSState.DONE;
+                            gtsNextActionMs = System.currentTimeMillis() + CONFIG.gtsCooldownMs;
+                        }
+                    } else {
+                        // GUI closed unexpectedly
+                        gtsState = GTSState.DONE;
+                    }
+                }
+                break;
+                
+            case DONE:
+                // Reset state
+                gtsState = GTSState.IDLE;
+                gtsTargetSeller = "";
+                gtsTargetItem = "";
+                gtsTargetPrice = 0;
+                break;
+        }
+    }
+    
+    /**
+     * Verify the actual price from the GTS GUI to prevent scams.
+     * Reads the item from slot 9 and parses the price from its display name or lore.
+     * @return The actual price in dollars, or -1 if price cannot be determined
+     */
+    private int verifyGTSPrice(MinecraftClient client, GenericContainerScreenHandler handler) {
+        if (handler == null || handler.slots.size() <= 13) {
+            return -1;
+        }
+        
+        // Get the item from slot 13 (confirmation GUI - has item name, seller, and price)
+        ItemStack stack = handler.slots.get(13).getStack();
+        if (stack == null || stack.isEmpty()) {
+            return -1;
+        }
+        
+        // Try to extract price from display name
+        String name = stack.getName().getString();
+        if (name != null && !name.isEmpty()) {
+            int price = extractPrice(name);
+            if (price > 0) {
+                return price;
+            }
+        }
+        
+        // Try to extract price from lore/tooltip
+        if (client.player != null && client.world != null) {
+            try {
+                var tooltip = stack.getTooltip(net.minecraft.item.Item.TooltipContext.create(client.world), client.player, net.minecraft.item.tooltip.TooltipType.BASIC);
+                for (var line : tooltip) {
+                    String text = line.getString();
+                    int price = extractPrice(text);
+                    if (price > 0) {
+                        return price;
+                    }
+                }
+            } catch (Exception e) {
+                // Tooltip extraction failed
+            }
+        }
+        
+        return -1; // Could not find price
+    }
+    
+    /**
+     * Extract a price value from text, handling various formats like $1,000 or 1000
+     * @param text The text to parse
+     * @return The price as an integer, or -1 if no price found
+     */
+    private int extractPrice(String text) {
+        if (text == null || text.isEmpty()) {
+            return -1;
+        }
+        
+        // Remove Minecraft color codes (§x)
+        String clean = text.replaceAll("§.", "");
+        
+        // Look for price patterns: $1,000 or $1000 or 1,000 or 1000
+        // Try to match numbers that look like prices
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("\\$?([\\d,]+)");
+        java.util.regex.Matcher matcher = pattern.matcher(clean);
+        
+        while (matcher.find()) {
+            String priceStr = matcher.group(1).replace(",", "");
+            try {
+                int price = Integer.parseInt(priceStr);
+                // Sanity check: price should be reasonable (between $1 and $1,000,000)
+                if (price >= 1 && price <= 1000000) {
+                    return price;
+                }
+            } catch (NumberFormatException e) {
+                // Not a valid number, continue searching
+            }
+        }
+        
+        return -1; // No price found
+    }
+    
+    /**
+     * Check if a username is valid for balance checking
+     * Filters out NPCs, bots, and special characters that cause command errors
+     */
+    private boolean isValidUsername(String username) {
+        if (username == null || username.isEmpty()) {
+            return false;
+        }
+        
+        // Skip usernames starting with special characters (NPCs, bots, etc.)
+        if (username.startsWith("!")) {
+            return false;
+        }
+        if (username.startsWith("~")) {
+            return false;
+        }
+        if (username.startsWith("#")) {
+            return false;
+        }
+        
+        // Only allow valid Minecraft usernames: a-z, A-Z, 0-9, and underscore
+        // Length: 1-16 characters
+        return username.matches("[a-zA-Z0-9_]{1,16}");
+    }
+    
+    /**
+     * Returns hardcoded list of specific players to check balances for.
+     * This is a temporary fix to bypass Minecraft's tab list limitation.
+     */
+    private java.util.List<String> getCustomPlayerList() {
+        return java.util.Arrays.asList(
+            "0______o_______0", "100krn", "1Exa", "1matin1lapin", "420VexD", "4zZy_", "7RIPLE",
+            "AK47XHY", "AKANE08", "ASingularCheerio", "ASriex1", "Abyssl_", "AccioDarkMark",
+            "Aerobro101", "AibertAinstein", "AidenFam21", "Aidenplayz5546", "Alexander539",
+            "AlphaJoker20", "Antaarioss", "AnubisAkaya", "ApricornDept", "ArkTorch", "ArsonCalypso",
+            "Arturo_GM", "Ash_Ketchup_oO", "Axewrose", "Azro26", "BLOODYMASTER63", "BPANTHERSON",
+            "BRobbo_", "BULKFUNN230", "Bankhead090", "Barneyzz", "BeastlyW", "Becons", "BenRain1011",
+            "Bennosukke", "BergmanDoe", "BergmanJoe", "BestJester14554", "BigSteppinOnEm", "BigTullz",
+            "Big_Dave65", "Birdboxx", "Birdboxxx", "Birdboxxxx", "Birdbx", "BishopJack", "Bkbox",
+            "Bkumoe", "Blakmajickkat", "Blank78_oof", "BlckZver", "BlueCubeGaming", "BlueGen2_Playzzz",
+            "BoaMarrow", "BoiledNoodle08", "BraveAxe26", "Brigghs", "Bunnery", "BurgersOnFleek",
+            "Caeltroxs", "CandyVi", "CapitaineZarbi", "Captain_Avera", "ChadThunderdock", "Chamathkara",
+            "Chechogx", "Chilli_Ramen", "Cincoco", "Cindirge", "Claytonctc", "CoconutWaffl3",
+            "CoucouSavaToi", "CrimsonConcholer", "CristVale", "CryoZKai", "CrypticEpodic",
+            "CrypticRedeemer", "Cyoro_", "D00magedd0n", "D4mD4m8787", "DaBroBenji", "DaDAWG64",
+            "DaGoddessz", "DaggerOfDreams", "Daphne", "Darkgamer5474", "Darkness3agle", "Darkong",
+            "DarkraisKing", "Daweed_42O", "Dawg20", "DeanStryder", "Delta_Drake", "DenchShipcrusher",
+            "Dinky_Evergreen", "DisneyWorld", "DocCoffee", "Dragon_Beast54", "Dragonblade9469",
+            "DrunkenMead8199", "Dshunk", "EdmonStevemon", "Elite_comando43", "Elay_Asher",
+            "Elwbnrandom", "Empathy_15", "Enderslayer7890", "Engineliam", "Erybel", "Ethan2691",
+            "EvanYuh", "EvenMountain0", "Fakemonman", "Falkirk", "Fehgatoni", "FeliipeF",
+            "FernNFungi", "FierceEnjoyer", "FireNationKing", "Fltmech", "FuneralPrincess",
+            "FunkyNucklez", "FutureBlock1620", "G1ganut", "GFGF508", "GLAMROCKFREDDI", "GQPlayer11",
+            "GamerOn3", "GayHighlighter", "GbzEnjoyers", "GenSpeedy", "Genesis_0", "GhostOut",
+            "GingerGiant2007", "GiverOrTaker", "Glyoh", "GoldeNightmar", "Goflow11", "Gr8King21",
+            "Green3yedGoblin", "Griimzey", "Grimvfx", "Grimzon", "Gryphh", "GuyThatHatesMC",
+            "Gxrciac", "H4rv3y_Tim3", "HOKUiN", "HabitualOak5", "HeatingCarton52", "Hellscream",
+            "HelpMeAmAddicted", "Hikari_ftw", "Hornetxc", "Huffleduff", "IAMKnickknack", "ILPHz",
+            "ImAltF4ing", "ImBardOut", "ImXie", "Im_NooBly", "IamZigge", "Ibylith_", "Ieugim",
+            "Imaout", "Interstella317", "Ironfootball", "Its_gilad", "ItsJustMeKarmaV2",
+            "Itsy_Bitsy_4sh", "JAC123321", "JARNACLE", "JDJACKPOT777", "JacobJacob5", "JamesThatcher",
+            "Jaz_21", "Jedionce", "JoCro_57", "JollyMutt", "JoseThc", "JrsZib", "Juic3b0x1111",
+            "JuniorMafiaO1", "JustChainsawz", "KAL2303", "KBD4207", "KinkUnc", "KiingClumsy",
+            "KirEXE", "Kirigiri_goat", "Kitterkiller132", "Kloe12356", "Kmoney001", "Knifeyboii",
+            "Kuuleii", "Kaelis64", "King_Noob_Bob_", "Lamprocapnos1", "Laetsuki", "Lamarglazer7720",
+            "LegendGamer2013", "LemLiam", "Lenyardo", "LilBootyVert", "LilWoozyVert", "Liam21212",
+            "Lil_Kaboom_Man", "LordsRose", "LostReader", "LU5HJ4S0N", "Lunaa43", "Man_Myth_Legend",
+            "Marce_B0T", "MarkyMarkC789", "Marytone", "MasSny016", "MatthewDiamorn", "Matt_32Ocean",
+            "Mean_Wash777", "MeEmilie", "MeoMayo", "Metrocool", "MicahBlue5", "Moist_FTR47",
+            "MoldyTaint", "Mondo_M0ron", "Mongorawrs", "MrPiggas", "MrSeeSando", "Mr_please",
+            "MsKohai", "Mulg02", "Munodot", "MunkOnNyquil", "MxUkiyo", "MysticNightSky", "Nexkka",
+            "NickyCorns", "NightSkies00", "NinjaSean2014", "Nomad_Danimal", "NovaAce", "Nutter_Butter58",
+            "Nvbzyy", "NyceGoblin10", "Nyxikyu", "OTAQUFATHER", "OTAdam11", "Omena082", "Omni_Poyo24",
+            "PAGANIUTO", "PaulFunyuns", "PapaSteve99", "Papczun", "Pewpewpew71", "PizzaMike",
+            "Poggograph", "PokeHog", "Polkapocalyptic", "Pottodesu", "Pureangel04", "Pxrplezzz",
+            "QuiteTired", "RGDK00471", "RLAC220209", "RaccTrench", "RaidenXXZone", "RaldMeky",
+            "RandomGuy58", "RenegadeHunter1", "ResolvedBasil54", "Reythonus", "RichardTheAlien",
+            "Riku8081", "RyanSandyz", "Ryker7812", "S1R_Kuuran", "SIXD9HER", "SKYYYY002", "SRVP",
+            "SBK_FROST", "SacredAfton", "SadVexation", "SaberAstro", "Salchin", "Sc00biez00bie",
+            "Schlossaa", "Scorch0019", "Semirias", "Senow", "Serged", "Shad0w_Mystic", "Shroll",
+            "Shrimpoe", "Silentzium", "SirKentC", "SixBangs", "SkitzOnNyQuil", "Skinny4321",
+            "Skualk", "Skys_Metro", "Slayerzx10", "SmearyPage54299", "Snugglydobbie2", "Sober_Lord",
+            "Soggymen", "Solari_the_Avali", "Solus68", "Sourisheart", "Soviet_Josh", "SparedJarl388",
+            "Stoocky", "Stone4983", "StormwingGTS", "StuffierBanjo11", "SunlitHaze", "SuperChar21",
+            "Sushiroll809", "Suttony", "Swaybar_", "Sweetin", "Syth40", "TAB1221gaming", "TURTLEKING1025",
+            "TalahKai", "Tank6201", "TastyAsians", "TeaCupForMe", "Tekp", "Th3yl0ve_MJ", "TheAGR0",
+            "TheLamestOne", "TheOrderOguz", "TheRealestRyu", "Therealkyzer", "Thirteen__",
+            "TiltL0rdd", "Timeless5ilver", "ToeT1ckler", "Tokumeino", "Toniii1", "TonyTheTiger538",
+            "Torhugo35", "ToxicShaDy", "Trent_Bliss_324", "Trickster1330", "TulaMarron3000",
+            "Typhon0425", "UberTMHK", "Uhaf56", "V4mpzz_", "VanillaTheBunny", "VinierPaul",
+            "ViviFrog", "Volt1ng", "W15HE5", "W31NI3S", "WildBeast737", "Willahbean", "William7_7",
+            "WoLfWReCkEr408", "Wolfized", "WooTea", "Wraither_Bring", "Wubungus", "Wero91310",
+            "Whynot_liam", "XTB", "XerXens", "XxguixX", "YapGPT", "YAUCHEN", "YUTAOPPA", "Youngiant",
+            "ZackJ420", "ZegoFruit", "Zerold7400", "ZestyMan", "Zief__", "_Ar3Q_", "_H3L3NN_",
+            "_J8KER_", "_Serrose", "_The_Lyros_", "_ZeroXA", "_xKokushibox_", "___o___o__",
+            "ace_sparkle_", "aceessentials", "agua_bottle", "ajphones", "antimagicsword",
+            "aPlainpancake", "appajoose", "aust15sector", "awesomepowers1", "axoLeef",
+            "agentduck123998", "babydady", "babywendawgz", "beanbeanbean_", "bobsky_0525",
+            "bst3w15", "bvc1", "carbonitrogen", "chiefoflaughter", "cmoney_7", "dhez",
+            "djisthebest223", "doritoplays", "electricwatt_", "env3xty", "ert1theturt1e",
+            "fefetorresgemeas", "foo_drone0", "franpato", "fxwny", "gg_gunner107", "ghost04997",
+            "gianlucabr14", "griffdagoat67", "half_return", "henhunfer", "honoru", "howf",
+            "humphreywolfy", "huskey420", "iiiZOEiii", "ilovefxxguild", "imRadwolf", "inLoveBunnee",
+            "iTzCr4zyPT", "itzJetJay", "ixPeanutxi", "iyluna", "jabooto", "jonnymhm", "just_aPig",
+            "kaipoidash2", "koldboyz", "krofile", "lgmobby", "laqified", "mannyma586", "maxik5",
+            "medkitlol", "meowdii_", "mih8ko", "milkdrinker84", "misotna", "monkeydey", "mseryx",
+            "mulchies", "natalia_t", "notbeezy", "oJerri", "oMareep", "opiebull2022", "og6yo",
+            "omriko301", "oncoffe123457", "onyspectrum", "oystergirl123", "CROSSFADDED69",
+            "papasmurf1515", "paslasher", "pesoDashoota", "pixelglitches49", "pokemon6979",
+            "psychiumz", "quinnininn", "rzxrr", "riceman513", "ricesoo", "rorert", "rustycreeper",
+            "samtheman1947", "scyf", "sinamile", "skillskills2001", "squaxer", "ssshayos",
+            "starofjustice", "susu_pheonix1123", "thelittleststar", "thewelshmando",
+            "theoneofakind224", "the_mad_jad", "thetornado494", "tokyo3315", "toasty_topaz",
+            "triqk", "troopler", "tylerrb21", "Earlystorm32670", "umdreon1st", "unicorm",
+            "unknownlix", "venturebug", "vichops", "vpve", "w0lfhunter7", "w1cked___tpp",
+            "woodabest", "wuantepz_", "xXCruelLoverXx", "xX_RB_Xx", "xochl", "ykAstrxl",
+            "yoinkydoinky", "yozhik7", "zepphyy_", "zkswen", "SnowyOwl10", "deathkilla25",
+            "Bigwhiteman21", "AdlixNZ", "Deve1oped", "nove11a", "mewzii_", "stoneypoint",
+            "Simpieoso", "DaSleepyDuck", "KeoMC_", "beanboy222", "Tonymontanag762",
+            "YourMajjesty", "TheRealOrijang", "Niosuill", "KAL2303"
+        );
+    }
+    
+    /**
+     * Balance Checker State Machine
+     */
+    private void tickBalanceStateMachine(MinecraftClient client) {
+        long now = System.currentTimeMillis();
+        
+        // Check cooldown
+        if (now < balanceNextActionMs) return;
+        
+        switch (balanceState) {
+            case COLLECTING_PLAYERS -> {
+                // Get players from custom list or tab list
+                if (client.player != null && client.player.networkHandler != null) {
+                    balancePlayers.clear();
+                    int totalFound = 0;
+                    int filteredOut = 0;
+                    
+                    if (CONFIG.balanceUseCustomList) {
+                        // Use hardcoded custom player list
+                        var customList = getCustomPlayerList();
+                        totalFound = customList.size();
+                        
+                        for (String name : customList) {
+                            // Filter out invalid usernames (NPCs, bots, special chars)
+                            if (!isValidUsername(name)) {
+                                filteredOut++;
+                                continue;
+                            }
+                            
+                            balancePlayers.add(name);
+                        }
+                        
+                        msg(client, "Balance Check: Using custom player list (" + totalFound + " players)");
+                    } else {
+                        // Use tab list (original behavior)
+                        var playerList = client.player.networkHandler.getPlayerList();
+                        totalFound = playerList.size();
+                        
+                        for (var playerEntry : playerList) {
+                            String name = playerEntry.getProfile().getName();
+                            
+                            // Filter out invalid usernames (NPCs, bots, special chars)
+                            if (!isValidUsername(name)) {
+                                filteredOut++;
+                                continue;
+                            }
+                            
+                            balancePlayers.add(name);
+                        }
+                        
+                        String filterMsg = filteredOut > 0 ? 
+                            " (filtered to " + balancePlayers.size() + " valid, skipped " + filteredOut + " NPCs/invalid)" : "";
+                        msg(client, "Balance Check: Found " + totalFound + " players from tab list" + filterMsg);
+                    }
+                    
+                    // Limit to max players to prevent kicks
+                    boolean limited = false;
+                    if (balancePlayers.size() > CONFIG.balanceMaxPlayers) {
+                        balancePlayers.subList(CONFIG.balanceMaxPlayers, balancePlayers.size()).clear();
+                        limited = true;
+                    }
+                    
+                    if (balancePlayers.isEmpty()) {
+                        msg(client, "Balance Check: No valid players found");
+                        balanceState = BalanceState.IDLE;
+                    } else {
+                        if (filteredOut > 0 && CONFIG.balanceUseCustomList) {
+                            msg(client, "Balance Check: Filtered to " + balancePlayers.size() + " valid (skipped " + filteredOut + " invalid)");
+                        }
+                        
+                        if (limited) {
+                            msg(client, "Balance Check: Limited to " + CONFIG.balanceMaxPlayers + " players max (change balanceMaxPlayers in config)");
+                        }
+                        
+                        balanceCurrentIndex = 0;
+                        balanceState = BalanceState.CHECKING_BALANCE;
+                        balanceNextActionMs = now + CONFIG.balanceCheckDelayMs;
+                    }
+                }
+            }
+            
+            case CHECKING_BALANCE -> {
+                if (balanceCurrentIndex < balancePlayers.size()) {
+                    String playerName = balancePlayers.get(balanceCurrentIndex);
+                    balanceWaitingFor = playerName;
+                    
+                    // Send /bal command
+                    if (client.player != null && client.player.networkHandler != null) {
+                        client.player.networkHandler.sendChatCommand(CONFIG.balanceCommand + " " + playerName);
+                        msg(client, "Checking: " + playerName + " (" + (balanceCurrentIndex + 1) + "/" + balancePlayers.size() + ")");
+                    }
+                    
+                    balanceState = BalanceState.WAITING_RESPONSE;
+                    balanceResponseTimeoutMs = now + 3000;  // 3 second timeout for response
+                    balanceNextActionMs = now + CONFIG.balanceCheckDelayMs;
+                    balanceCurrentIndex++;
+                } else {
+                    // All players checked
+                    balanceState = BalanceState.DONE;
+                }
+            }
+            
+            case WAITING_RESPONSE -> {
+                // Wait for response or timeout
+                if (now >= balanceResponseTimeoutMs) {
+                    // Timeout - move on to check batch limits
+                    balanceBatchCounter++;
+                    
+                    // Check if we've hit batch limit and still have more players
+                    if (balanceBatchCounter >= CONFIG.balanceBatchSize && balanceCurrentIndex < balancePlayers.size()) {
+                        // Pause between batches
+                        int batchNumber = balanceBatchCounter / CONFIG.balanceBatchSize;
+                        msg(client, String.format("Batch %d complete (%d/%d players), pausing %d seconds...", 
+                            batchNumber, balanceCurrentIndex, balancePlayers.size(), CONFIG.balanceBatchPauseMs / 1000));
+                        balanceState = BalanceState.BATCH_PAUSE;
+                        balanceBatchPauseUntil = now + CONFIG.balanceBatchPauseMs;
+                        balanceBatchCounter = 0;  // Reset batch counter
+                    } else {
+                        // Continue to next player
+                        balanceState = BalanceState.CHECKING_BALANCE;
+                    }
+                }
+                // If not timeout, stay in WAITING_RESPONSE until chat handler receives balance
+            }
+            
+            case BATCH_PAUSE -> {
+                // Wait for pause to complete
+                if (now >= balanceBatchPauseUntil) {
+                    msg(client, "Resuming balance checks...");
+                    balanceState = BalanceState.CHECKING_BALANCE;
+                }
+            }
+            
+            case DONE -> {
+                // Display results
+                displayBalanceResults(client);
+                
+                // Save to file if enabled
+                if (CONFIG.balanceLogToFile) {
+                    saveBalancesToFile(client);
+                }
+                
+                // Reset
+                balanceState = BalanceState.IDLE;
+                balancePlayers.clear();
+                balanceResults.clear();  // Clear balance data for next check
+                balanceCurrentIndex = 0;
+                balanceWaitingFor = "";
+            }
+        }
+    }
+    
+    /**
+     * Display balance results in chat
+     */
+    private void displayBalanceResults(MinecraftClient client) {
+        if (balanceResults.isEmpty()) {
+            msg(client, "Balance Check: No balances collected");
+            return;
+        }
+        
+        msg(client, "====================================");
+        msg(client, "Balance Check Complete!");
+        msg(client, "Players Checked: " + balanceResults.size());
+        msg(client, "====================================");
+        
+        // Sort by balance (highest first) and display top 10
+        balanceResults.entrySet().stream()
+                .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                .limit(10)
+                .forEach(entry -> {
+                    msg(client, String.format("%s: $%,d", entry.getKey(), entry.getValue()));
+                });
+        
+        if (balanceResults.size() > 10) {
+            msg(client, "... and " + (balanceResults.size() - 10) + " more");
+        }
+        msg(client, "====================================");
+    }
+    
+    /**
+     * Save balance results to log file
+     */
+    private void saveBalancesToFile(MinecraftClient client) {
+        try {
+            // Create logs directory if it doesn't exist
+            Path logsDir = FabricLoader.getInstance().getGameDir().resolve("logs");
+            if (!Files.exists(logsDir)) {
+                Files.createDirectories(logsDir);
+            }
+            
+            // Generate filename with timestamp
+            String timestamp = java.time.LocalDateTime.now().format(
+                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+            );
+            Path logFile = logsDir.resolve("balances_" + timestamp + ".txt");
+            
+            // Build content
+            StringBuilder content = new StringBuilder();
+            content.append("====================================\n");
+            content.append("Balance Check Results\n");
+            content.append("====================================\n");
+            content.append("Date: ").append(java.time.LocalDateTime.now()).append("\n");
+            content.append("Players Checked: ").append(balanceResults.size()).append("\n");
+            if (client.getCurrentServerEntry() != null) {
+                content.append("Server: ").append(client.getCurrentServerEntry().address).append("\n");
+            }
+            content.append("====================================\n\n");
+            content.append("Top Balances (Sorted):\n\n");
+            
+            // Sort and add all balances
+            int rank = 1;
+            var sortedEntries = balanceResults.entrySet().stream()
+                    .sorted((a, b) -> Long.compare(b.getValue(), a.getValue()))
+                    .toList();
+            
+            for (var entry : sortedEntries) {
+                content.append(String.format("%d. %s: $%,d\n", rank++, entry.getKey(), entry.getValue()));
+            }
+            
+            content.append("\n====================================\n");
+            content.append("End of Report\n");
+            content.append("====================================\n");
+            
+            // Write to file
+            Files.writeString(logFile, content.toString(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            
+            msg(client, "Balance Check: Saved to " + logFile.getFileName());
+        } catch (IOException e) {
+            msg(client, "Balance Check: Failed to save log file: " + e.getMessage());
+        }
+    }
+    
     private void onEndTick(MinecraftClient client) {
         if (client.player == null || client.world == null) return;
 
@@ -310,10 +1014,23 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     return;
                 }
                 if (System.currentTimeMillis() >= phaseReadyAtMs) {
-                    sendSellAllCommand(client);
-                    loopPhase = LoopPhase.DELAY;
-                    phaseReadyAtMs = System.currentTimeMillis() + 1000;
-                    nextActionAtMs = phaseReadyAtMs;
+                    // Check if more metronomes can be crafted with remaining materials
+                    // This properly accounts for iron blocks, ingots, nuggets AND note blocks
+                    // Returns 0 if insufficient materials, otherwise the number of craftable metronomes
+                    int craftsPossible = computeCraftsPossible(client);
+                    
+                    if (craftsPossible > 0) {
+                        // Materials exist for at least one more craft - restart crafting instead of selling
+                        msg(client, String.format("Restarting crafting for %d more metronome(s)", craftsPossible));
+                        loopPhase = LoopPhase.CRAFTING;
+                        autoCraftMetronomes(client);
+                    } else {
+                        // No materials - proceed with selling
+                        sendSellAllCommand(client);
+                        loopPhase = LoopPhase.DELAY;
+                        phaseReadyAtMs = System.currentTimeMillis() + 1000;
+                    }
+                    nextActionAtMs = System.currentTimeMillis() + 1000;
                 }
             }
             case DELAY -> {
@@ -331,9 +1048,24 @@ public class ShopNavigatorClient implements ClientModInitializer {
         }
 
         // If we queued selling after crafting, close any open screen then send /sell all
+        // But first check if there are materials remaining that could be crafted
         if (queueSellAfterClose && client.currentScreen == null && !craftRunning && !craftAwaiting) {
             queueSellAfterClose = false;
-            sendSellAllCommand(client);
+            
+            // Check if more metronomes can be crafted with remaining materials
+            // This properly accounts for iron blocks, ingots, nuggets AND note blocks
+            // Returns 0 if insufficient materials, otherwise the number of craftable metronomes
+            int craftsPossible = computeCraftsPossible(client);
+            
+            if (craftsPossible > 0) {
+                // Materials exist for at least one more craft - try to craft instead of selling
+                msg(client, String.format("Found materials for %d more metronome(s) - attempting to craft instead of selling", craftsPossible));
+                autoCraftMetronomes(client);
+            } else {
+                // No materials - proceed with selling
+                sendSellAllCommand(client);
+            }
+            
             // wait 1 second before any new loop/command
             nextActionAtMs = System.currentTimeMillis() + 1000;
         }
@@ -393,6 +1125,41 @@ public class ShopNavigatorClient implements ClientModInitializer {
             craftFinishAtMs = 0;
             loopPhase = LoopPhase.IDLE;
         }
+        
+        // GTS Auto-Buyer toggle
+        while (gtsToggleKey.wasPressed()) {
+            CONFIG.gtsEnabled = !CONFIG.gtsEnabled;
+            String status = CONFIG.gtsEnabled ? "ENABLED" : "DISABLED";
+            msg(client, "GTS Auto-Buyer: " + status + " (max price: $" + CONFIG.gtsMaxPrice + ", hard cap: $" + CONFIG.gtsHardCap + ")");
+            CONFIG.save();
+        }
+        
+        // Run GTS state machine if enabled
+        if (CONFIG.gtsEnabled) {
+            tickGTSStateMachine(client);
+        }
+        
+        // Balance Checker toggle
+        while (baltopKey.wasPressed()) {
+            if (balanceState == BalanceState.IDLE) {
+                // Start balance check
+                balanceState = BalanceState.COLLECTING_PLAYERS;
+                balancePlayers.clear();
+                balanceResults.clear();
+                balanceCurrentIndex = 0;
+                balanceBatchCounter = 0;  // Reset batch counter
+                msg(client, "Balance Check: Starting...");
+            } else {
+                // Stop balance check
+                balanceState = BalanceState.IDLE;
+                msg(client, "Balance Check: Stopped");
+            }
+        }
+        
+        // Run Balance state machine if active
+        if (balanceState != BalanceState.IDLE) {
+            tickBalanceStateMachine(client);
+        }
 
         if (craftRunning) {
             if (craftTickCooldown > 0) {
@@ -405,6 +1172,28 @@ public class ShopNavigatorClient implements ClientModInitializer {
         if (state == State.IDLE || state == State.DONE || state == State.FAILED) return;
 
         long now = System.currentTimeMillis();
+        
+        // Detect if state machine is stuck (no state change for too long)
+        if (state != State.IDLE && state != State.DONE && state != State.FAILED) {
+            long timeSinceStateChange = now - lastStateChangeMs;
+            if (timeSinceStateChange > STATE_TIMEOUT_MS) {
+                msg(client, "WARNING: State machine stuck in " + state + " for " + (timeSinceStateChange / 1000) + "s. Attempting recovery...");
+                
+                if (stateTimeoutRetries >= MAX_STATE_TIMEOUT_RETRIES) {
+                    fail(client, "State machine stuck after " + stateTimeoutRetries + " recovery attempts. State: " + state);
+                    stateTimeoutRetries = 0;
+                    return;
+                }
+                
+                stateTimeoutRetries++;
+                forceCloseScreen(client);
+                setState(State.SEND_SHOP);
+                cooldown(CONFIG.cooldownSendShopMs * 2); // Extra delay after recovery
+                msg(client, "Recovery attempt " + stateTimeoutRetries + "/" + MAX_STATE_TIMEOUT_RETRIES + ": Restarting from SEND_SHOP");
+                return;
+            }
+        }
+        
         if (now < nextActionAtMs) return;
 
         try {
@@ -416,22 +1205,61 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
 
     private void start(MinecraftClient client) {
-        state = State.SEND_SHOP;
         lastPageNumber = -1;
         nextActionAtMs = 0;
         currentStage = 1;
         loadStageConfig(currentStage);
         planIndex = 0;
-        activeQuantity = CONFIG.usePlan ? currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)] : CONFIG.targetQuantity;
+        stateTimeoutRetries = 0; // Reset retry counter when starting fresh shopping
+        
+        // Calculate initial shopping quantity based on what's already in inventory
+        int plannedQuantity = CONFIG.usePlan ? currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)] : CONFIG.targetQuantity;
+        
+        // Check current inventory to avoid buying too many items
+        recalcInventory(client);
+        int currentlyOwned = 0;
+        
+        // Determine what item we're shopping for and how much we already have
+        Item targetItem = getTargetItem();
+        if (targetItem != null) {
+            if (targetItem == NOTE_BLOCK) {
+                currentlyOwned = noteBlocks;
+            } else if (targetItem == IRON_BLOCK) {
+                currentlyOwned = ironBlocks;
+            } else {
+                // For other items, count them in inventory
+                currentlyOwned = countItem(client.player.getInventory(), targetItem);
+            }
+        }
+        
+        // Adjust quantity based on what we already have
+        // Only buy what we don't already have (up to the planned amount for this batch)
+        activeQuantity = Math.max(0, plannedQuantity - currentlyOwned);
         activeRemaining = activeQuantity;
+        
         loggedMissingStageItems = false;
-        msg(client, "ShopNavigator: Started. Stage " + currentStage + " Target=" + currentTargetItemId + " qty=" + activeQuantity +
-                (CONFIG.usePlan ? " (plan " + currentPlanQuantities.length + " batches)" : ""));
+        stateTimeoutRetries = 0;
+        
+        if (activeQuantity <= 0) {
+            msg(client, "ShopNavigator: Started. Stage " + currentStage + " Target=" + currentTargetItemId + 
+                    " - Already have " + currentlyOwned + " items, skipping to crafting.");
+            // Skip shopping, go directly to crafting
+            done(client, "Already have enough items for stage " + currentStage);
+            loopPhase = LoopPhase.WAIT_CLOSE_SHOP;
+            phaseReadyAtMs = System.currentTimeMillis() + 1000;
+            nextActionAtMs = phaseReadyAtMs;
+        } else {
+            setState(State.SEND_SHOP);
+            msg(client, "ShopNavigator: Started. Stage " + currentStage + " Target=" + currentTargetItemId + 
+                    " qty=" + activeQuantity + " (have " + currentlyOwned + ", need " + plannedQuantity + ")" +
+                    (CONFIG.usePlan ? " (plan " + currentPlanQuantities.length + " batches)" : ""));
+        }
     }
 
     private void stop(MinecraftClient client, String reason) {
-        state = State.IDLE;
+        setState(State.IDLE);
         nextActionAtMs = 0;
+        stateTimeoutRetries = 0;
         msg(client, "ShopNavigator: " + reason);
     }
 
@@ -443,13 +1271,23 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
 
     private void done(MinecraftClient client, String reason) {
-        state = State.DONE;
+        setState(State.DONE);
+        stateTimeoutRetries = 0;
         msg(client, "ShopNavigator: DONE. " + reason);
     }
 
     private void fail(MinecraftClient client, String reason) {
-        state = State.FAILED;
+        setState(State.FAILED);
+        stateTimeoutRetries = 0;
         msg(client, "ShopNavigator: FAILED. " + reason);
+    }
+
+    private void setState(State newState) {
+        if (this.state != newState) {
+            this.lastState = this.state;
+            this.state = newState;
+            this.lastStateChangeMs = System.currentTimeMillis();
+        }
     }
 
     // Close GUI and then start the auto-crafting flow (same as F10) once the GUI is actually closed.
@@ -464,7 +1302,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
             case SEND_SHOP -> {
                 // Send /shop, then wait for listing GUI
                 sendShopCommand(client);
-                state = State.WAIT_FOR_LISTING_6ROWS;
+                setState(State.WAIT_FOR_LISTING_6ROWS);
                 cooldown(CONFIG.cooldownSendShopMs);
             }
 
@@ -479,14 +1317,14 @@ public class ShopNavigatorClient implements ClientModInitializer {
                     // Some servers show a 5-row menu first; wait until we reach the 6-row listing.
                     if (rows == 6 && title != null && title.contains(CONFIG.listingTitleMustContain)) {
                         lastPageNumber = parsePageNumber(title);
-                        state = State.SCAN_PAGE_FOR_ITEM;
+                        setState(State.SCAN_PAGE_FOR_ITEM);
                         msg(client, "Listing detected. Title=\"" + title + "\" page=" + lastPageNumber);
                         cooldown(CONFIG.cooldownPageMs / 2);
                     }
                 } else {
                     // No pagination for this stage: proceed immediately
                     lastPageNumber = 1;
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     msg(client, "Listing detected (no pagination). Title=\"" + title + "\" rows=" + rows);
                     cooldown(CONFIG.cooldownPageMs / 2);
                 }
@@ -510,7 +1348,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (foundSlot != -1) {
                     clickSlot(client, h, foundSlot);
                     msg(client, "Clicked target item at slot " + foundSlot + ". Waiting for quantity selector...");
-                    state = State.WAIT_FOR_QUANTITY_3ROWS;
+                    setState(State.WAIT_FOR_QUANTITY_3ROWS);
                     cooldown(CONFIG.cooldownQuantityMs);
                     return;
                 }
@@ -546,7 +1384,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 String title = getHandledTitle(client);
                 lastPageNumber = parsePageNumber(title);
                 clickSlot(client, h, CONFIG.nextPageSlot);
-                state = State.WAIT_PAGE_CHANGE;
+                setState(State.WAIT_PAGE_CHANGE);
                 cooldown(CONFIG.cooldownPageMs);
             }
 
@@ -560,7 +1398,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
                 // If title parsing fails, fall back to a short delay and rescan (still works).
                 if (page == -1) {
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     cooldown(CONFIG.cooldownPageMs);
                     return;
                 }
@@ -568,7 +1406,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (page != lastPageNumber) {
                     lastPageNumber = page;
                     msg(client, "Page changed -> " + page);
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     cooldown(CONFIG.cooldownPageMs / 2);
                 }
             }
@@ -578,7 +1416,7 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (g == null) return;
 
                 if (g.getRows() == 3) {
-                    state = State.CLICK_QUANTITY;
+                    setState(State.CLICK_QUANTITY);
                     cooldown(CONFIG.cooldownQuantityMs / 2);
                 }
             }
@@ -607,15 +1445,16 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 if (activeRemaining > 0) {
                     msg(client, "Partial fill: picked " + selectedAmount + ", remaining " + activeRemaining + " for this batch");
                     // Need to reopen listing and item
-                    state = State.SCAN_PAGE_FOR_ITEM;
+                    setState(State.SCAN_PAGE_FOR_ITEM);
                     cooldown(CONFIG.cooldownQuantityMs);
                 } else if (CONFIG.usePlan && planIndex + 1 < currentPlanQuantities.length) {
                     planIndex++;
                     activeQuantity = currentPlanQuantities[planIndex];
                     activeRemaining = activeQuantity;
                     loggedMissingStageItems = false;
+                    stateTimeoutRetries = 0; // Reset retry counter on successful batch completion
                     msg(client, "Batch " + planIndex + "/" + (currentPlanQuantities.length - 1) + " done; next qty " + activeQuantity + " — reopening shop");
-                    state = State.SEND_SHOP; // reopen in case GUI closed after purchase
+                    setState(State.SEND_SHOP); // reopen in case GUI closed after purchase
                     cooldown(CONFIG.cooldownSendShopMs);
                 } else {
                     // Stage completion
@@ -623,12 +1462,47 @@ public class ShopNavigatorClient implements ClientModInitializer {
                         currentStage = 2;
                         loadStageConfig(currentStage);
                         planIndex = 0;
-                        activeQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
-                        activeRemaining = activeQuantity;
-                        loggedMissingStageItems = false;
-                        msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + " qty=" + activeQuantity);
-                        state = State.SEND_SHOP;
-                        cooldown(CONFIG.cooldownSendShopMs);
+                        
+                        // Check current inventory before stage 2 to avoid buying if already have items
+                        recalcInventory(client);
+                        int currentlyOwned = 0;
+                        Item targetItem = getTargetItem();
+                        if (targetItem != null) {
+                            if (targetItem == NOTE_BLOCK) {
+                                currentlyOwned = noteBlocks;
+                            } else if (targetItem == IRON_BLOCK) {
+                                currentlyOwned = ironBlocks;
+                            } else {
+                                currentlyOwned = countItem(client.player.getInventory(), targetItem);
+                            }
+                        }
+                        
+                        // For stage 2, check against TOTAL needed across all batches, not just first batch
+                        int totalNeeded = 0;
+                        for (int qty : currentPlanQuantities) {
+                            totalNeeded += qty;
+                        }
+                        
+                        if (currentlyOwned >= totalNeeded) {
+                            // Already have enough items for entire stage 2 - go to crafting
+                            msg(client, "Stage 1 complete. Stage 2 target=" + currentTargetItemId + 
+                                    " - already have enough items (" + currentlyOwned + " >= " + totalNeeded + "), going to crafting");
+                            done(client, "All items already available");
+                            forceCloseScreen(client);
+                            loopPhase = LoopPhase.WAIT_CLOSE_SHOP;
+                            phaseReadyAtMs = System.currentTimeMillis() + 1000;
+                            nextActionAtMs = phaseReadyAtMs;
+                        } else {
+                            // Need to shop for stage 2 - start with first batch
+                            activeQuantity = currentPlanQuantities[Math.min(planIndex, currentPlanQuantities.length - 1)];
+                            activeRemaining = activeQuantity;
+                            loggedMissingStageItems = false;
+                            stateTimeoutRetries = 0; // Reset retry counter on successful stage transition
+                            msg(client, "Stage 1 complete. Switching to Stage 2 target=" + currentTargetItemId + 
+                                    " qty=" + activeQuantity + " (have " + currentlyOwned + ", need total " + totalNeeded + ")");
+                            setState(State.SEND_SHOP);
+                            cooldown(CONFIG.cooldownSendShopMs);
+                        }
                     } else {
                         // final stage complete: transition to crafting phase
                         done(client, "Completed final batch.");
@@ -721,7 +1595,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
     private void clickSlotGrid(MinecraftClient client, ScreenHandler handler, int slotIndex, int button) {
         client.interactionManager.clickSlot(handler.syncId, slotIndex, button, SlotActionType.PICKUP, client.player);
-        cooldown(CONFIG.craftPlaceCooldownMs);
+        // Slow down for batch 14 onwards to prevent server desync during conversions
+        long delay = CONFIG.craftPlaceCooldownMs;
+        if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+            delay *= BATCH_DELAY_MULTIPLIER;
+        }
+        cooldown(delay);
     }
 
     private void cooldown(long ms) {
@@ -851,7 +1730,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
     }
 
     private void setCraftCooldown() {
-        craftTickCooldown = Math.max(CONFIG.craftTickCooldown, MIN_ACTION_COOLDOWN_TICKS);
+        int cooldown = Math.max(CONFIG.craftTickCooldown, MIN_ACTION_COOLDOWN_TICKS);
+        // Slow down for batch 14 onwards (triple the cooldown)
+        if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+            cooldown *= BATCH_DELAY_MULTIPLIER;
+        }
+        craftTickCooldown = cooldown;
     }
 
 
@@ -1123,13 +2007,18 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 setCraftCooldown();
                 return true;
             }
-            if (now - pendingSinceMs < 20) {
+            // Slow down for batch 14 onwards to give server more time to recognize conversions
+            // Increased timeout from 200ms to 500ms to handle server lag better
+            long conversionTimeout = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 500 : 20;
+            if (now - pendingSinceMs < conversionTimeout) {
                 setCraftCooldown();
                 return true;
             }
-            if (pendingRetries >= 4) {
+            // Increased max retries from 4 to 10 for batch 14+ to handle server lag
+            int maxRetries = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? 10 : 4;
+            if (pendingRetries >= maxRetries) {
                 String kind = pendingConversion.kind == ConversionKind.BREAK_BLOCK_TO_INGOTS ? "break blocks" : "convert ingots to nuggets";
-                autoPauseOnConversionFailure(client, "failed to " + kind + " after retries; ingotRoom=" + ingotStackRoom + " nuggetRoom=" + nuggetStackRoom + " emptySlots=" + emptySlots);
+                autoPauseOnConversionFailure(client, "failed to " + kind + " after " + maxRetries + " retries; ingotRoom=" + ingotStackRoom + " nuggetRoom=" + nuggetStackRoom + " emptySlots=" + emptySlots);
                 return true;
             }
             if (!executeConversionOp(client, h, pendingConversion)) {
@@ -1233,7 +2122,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
 
     private void quickMoveSlot(MinecraftClient client, ScreenHandler handler, int slotIndex) {
         client.interactionManager.clickSlot(handler.syncId, slotIndex, 0, SlotActionType.QUICK_MOVE, client.player);
-        cooldown(CONFIG.craftPlaceCooldownMs); // significantly longer delay for server sync
+        // Slow down for batch 14 onwards to prevent server desync during conversions
+        long delay = CONFIG.craftPlaceCooldownMs;
+        if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+            delay *= BATCH_DELAY_MULTIPLIER;
+        }
+        cooldown(delay); // significantly longer delay for server sync
     }
 
     private boolean dumpCursorToInventory(MinecraftClient client, ScreenHandler h) {
@@ -1508,9 +2402,17 @@ public class ShopNavigatorClient implements ClientModInitializer {
             return false;
         }
 
-        // Fill ingot slots (steps 1-5) - fill all 5 slots in one tick for maximum safe speed
+        // Fill ingot slots (steps 1-5)
+        // For batches 14+, fill one slot at a time to prevent server desync
+        // For earlier batches, fill all 5 slots in one tick for maximum safe speed
+        int maxSlotsPerTick = craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD ? SLOW_FILL_SLOTS_PER_TICK : FAST_FILL_SLOTS_PER_TICK;
         int slotsFilledThisTick = 0;
-        while (gridFillStep >= 1 && gridFillStep <= 5 && slotsFilledThisTick < 5) {
+        while (gridFillStep >= 1 && gridFillStep <= FAST_FILL_SLOTS_PER_TICK && slotsFilledThisTick < maxSlotsPerTick) {
+            // Recalculate inventory before each slot fill for batches 14+ to ensure accuracy
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                recalcInventory(client, false);
+            }
+            
             int slotIndex = gridFillStep - 1;
             int targetSlot = INGOT_SLOTS[slotIndex];
             debug(client, "[GridFill] Filling ingot slot " + targetSlot + " (step " + gridFillStep + ")");
@@ -1525,12 +2427,17 @@ public class ShopNavigatorClient implements ClientModInitializer {
         }
         
         // If we filled some ingot slots but not all, return to continue next tick
-        if (gridFillStep >= 1 && gridFillStep <= 5) {
+        if (gridFillStep >= 1 && gridFillStep <= FAST_FILL_SLOTS_PER_TICK) {
             return false;
         }
 
         // Fill nugget slot (step 6)
         if (gridFillStep == 6) {
+            // Recalculate inventory before filling for batches 14+ to ensure accuracy
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                recalcInventory(client, false);
+            }
+            
             debug(client, "[GridFill] Filling nugget slot " + NUGGET_SLOT);
             if (!topUpSlot(client, h, NUGGET_SLOT, IRON_NUGGET, gridFillNeed)) {
                 msg(client, "AutoCraft: need " + gridFillNeed + " nuggets in slot " + NUGGET_SLOT + " (have " + h.getSlot(NUGGET_SLOT).getStack().getCount() + "), inv nuggets=" + nuggets + " ingots=" + ingots);
@@ -1539,11 +2446,20 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 return false;
             }
             gridFillStep++;
-            // Continue to note block slot in same tick
+            // For batches 14+, process nugget and note block on separate ticks
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                return false;
+            }
+            // Continue to note block slot in same tick for earlier batches
         }
 
         // Fill note block slot (step 7)
         if (gridFillStep == 7) {
+            // Recalculate inventory before filling for batches 14+ to ensure accuracy
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                recalcInventory(client, false);
+            }
+            
             debug(client, "[GridFill] Filling note block slot " + NOTE_SLOT);
             if (!topUpSlot(client, h, NOTE_SLOT, NOTE_BLOCK, gridFillNeed)) {
                 msg(client, "AutoCraft: need " + gridFillNeed + " note blocks in slot " + NOTE_SLOT + " (have " + h.getSlot(NOTE_SLOT).getStack().getCount() + "), inv notes=" + noteBlocks);
@@ -1711,19 +2627,28 @@ public class ShopNavigatorClient implements ClientModInitializer {
             // If we already have enough nuggets, skip conversions.
             int nuggetShortNow = Math.max(0, reqNuggets - nuggets);
             int ingotsToNuggetsNeed = (int) Math.ceil(nuggetShortNow / 9.0);
+            // IMPORTANT: Also check if we have room for the nuggets that will be created
+            // Each ingot converts to 9 nuggets, so we need 9x room
+            int maxIngotsBasedOnRoom = nuggetStackRoom / NUGGETS_PER_INGOT;
+            ingotsToNuggetsNeed = Math.min(ingotsToNuggetsNeed, maxIngotsBasedOnRoom);
             planIngotsToNuggetsRemaining = Math.min(planIngotsToNuggetsRemaining, Math.max(0, ingotsToNuggetsNeed));
 
             // Build/execute conversion queue: one operation at a time, ACKed between actions.
             if (conversionQueue.isEmpty() && pendingConversion == null) {
+                // For batch 14 ONLY (the last batch), use smaller units for extra safety
+                // User feedback: Keep 64 units for all batches except the very last one
+                int blockUnits = craftBatchIndex == 14 ? 8 : BLOCKS_TO_INGOTS_UNITS_PER_OP;
+                int ingotUnits = craftBatchIndex == 14 ? 8 : INGOTS_TO_NUGGETS_UNITS_PER_OP;
+                
                 int blocksLeft = planBlocksRemaining;
                 while (blocksLeft > 0) {
-                    int units = Math.min(BLOCKS_TO_INGOTS_UNITS_PER_OP, blocksLeft);
+                    int units = Math.min(blockUnits, blocksLeft);
                     conversionQueue.addLast(new ConversionOp(ConversionKind.BREAK_BLOCK_TO_INGOTS, units));
                     blocksLeft -= units;
                 }
                 int nuggetsLeft = planIngotsToNuggetsRemaining;
                 while (nuggetsLeft > 0) {
-                    int units = Math.min(INGOTS_TO_NUGGETS_UNITS_PER_OP, nuggetsLeft);
+                    int units = Math.min(ingotUnits, nuggetsLeft);
                     conversionQueue.addLast(new ConversionOp(ConversionKind.INGOT_TO_NUGGETS, units));
                     nuggetsLeft -= units;
                 }
@@ -1745,8 +2670,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
             }
             gridLoaded = true;
             // give the server a moment to settle the crafting grid before we start crafting
-            // Use configurable post-grid delay
-            gridReadyAtMs = System.currentTimeMillis() + (CONFIG != null && CONFIG.postGridDelayMs > 0 ? CONFIG.postGridDelayMs : postGridDelayMs);
+            // Use configurable post-grid delay, with increased delay for batch 14 onwards
+            long delayToUse = (CONFIG != null && CONFIG.postGridDelayMs > 0 ? CONFIG.postGridDelayMs : postGridDelayMs);
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                delayToUse *= BATCH_DELAY_MULTIPLIER; // Slow down for batch 14 onwards (triple the delay)
+            }
+            gridReadyAtMs = System.currentTimeMillis() + delayToUse;
             craftBatchIndex++;
             planBlocksRemaining = 0;
             planIngotsToNuggetsRemaining = 0;
@@ -1788,7 +2717,12 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 msg(client, "AutoCraft: crafted " + craftCrafted + "/" + craftTarget);
             }
             // Add delay after collecting output to prevent crashes/desync
-            craftTickCooldown = Math.max((int)(CONFIG.craftOutputBurstDelayMs / 50L), 1);
+            // Slow down for batch 14 onwards (triple the delay)
+            int burstDelay = (int)(CONFIG.craftOutputBurstDelayMs / 50L);
+            if (craftBatchIndex >= DESYNC_PREVENTION_BATCH_THRESHOLD) {
+                burstDelay *= BATCH_DELAY_MULTIPLIER;
+            }
+            craftTickCooldown = Math.max(burstDelay, 1);
             return;
         }
 
@@ -1921,6 +2855,23 @@ public class ShopNavigatorClient implements ClientModInitializer {
         public String stage2TargetItemId = "minecraft:iron_block";
         public int[] stage2PlanQuantities = new int[]{256, 256, 32, 8};
         public boolean stage2UsesPagination = false;
+        
+        // GTS Auto-Buyer Configuration
+        public boolean gtsEnabled = false;
+        public int gtsMaxPrice = 1000;
+        public int gtsHardCap = 1500;
+        public long gtsCooldownMs = 100;
+        public String gtsCommand = "gts";
+        
+        // Balance Checker configuration
+        public boolean balanceCheckEnabled = false;
+        public long balanceCheckDelayMs = 2500;
+        public String balanceCommand = "bal";
+        public boolean balanceLogToFile = true;
+        public boolean balanceUseCustomList = true;  // Use hardcoded player list instead of tab list
+        public int balanceMaxPlayers = 533;  // Total hardcoded players
+        public int balanceBatchSize = 20;  // Check this many players before pausing
+        public long balanceBatchPauseMs = 10000;  // Pause 10 seconds between batches
 
         private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
         private static final Path PATH = FabricLoader.getInstance().getConfigDir().resolve("shopnavigator.json");
@@ -1949,6 +2900,10 @@ public class ShopNavigatorClient implements ClientModInitializer {
                 // If pagination flags are missing, set defaults
                 if (!cfg.useTwoStagePlan) {
                     // single-stage case: keep existing shopCommand/target/plan
+                }
+                // Migrate old balanceMaxPlayers value (50 -> 533)
+                if (cfg.balanceMaxPlayers == 50) {
+                    cfg.balanceMaxPlayers = 533;  // Update to check all hardcoded players
                 }
                 Files.createDirectories(PATH.getParent());
                 Files.writeString(PATH, GSON.toJson(cfg));
